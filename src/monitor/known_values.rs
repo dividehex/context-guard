@@ -506,6 +506,62 @@ mod tests {
         assert!(has(&v, ValueKind::NumericCfg, "max_input_tokens", "12288"));
     }
 
+    #[test]
+    fn url_variants_and_port_forms() {
+        let v = ex("see http://[fe80::1]:8443/x and https://user:pw@api.example.com:9443/v1 plus http://10.0.0.5/ then run -p 5432 and PORT=6379");
+        assert!(
+            has(&v, ValueKind::Ipv6, "", "fe80::1")
+                || v.iter()
+                    .any(|e| e.kind == ValueKind::Port && e.value == "8443")
+        );
+        assert!(has(&v, ValueKind::Hostname, "", "api.example.com"));
+        assert!(has(&v, ValueKind::Port, "api.example.com", "9443"));
+        assert!(has(&v, ValueKind::Ipv4, "", "10.0.0.5"));
+        assert!(has(&v, ValueKind::Port, "", "5432"));
+        assert!(has(&v, ValueKind::EnvVar, "PORT", "6379"));
+        assert!(
+            ex("mail me at someone@mail.example.com")
+                .iter()
+                .all(|e| e.kind != ValueKind::Hostname),
+            "e-mail hosts are not hostnames"
+        );
+        assert!(has(
+            &ex("the container proton-bridge restarted"),
+            ValueKind::Container,
+            "",
+            "proton-bridge"
+        ));
+        assert!(has(
+            &ex("Open WebUI v.0.11.3 is current"),
+            ValueKind::Version,
+            "",
+            "0.11.3"
+        ));
+    }
+
+    #[test]
+    fn drift_dedupes_repeated_claims_and_ignores_unknown_kinds() {
+        let registry = vec![known(ValueKind::Port, "", "4000")];
+        let d = detect_drift(&ex("port 4100 ... again port 4100"), &registry);
+        assert_eq!(d.len(), 1, "one drift per distinct claim");
+        assert!(detect_drift(&ex("path /var/log/x.log"), &registry).is_empty());
+        assert_eq!(ValueKind::parse("nope"), None);
+        for k in [
+            ValueKind::Ipv4,
+            ValueKind::Ipv6,
+            ValueKind::Port,
+            ValueKind::Url,
+            ValueKind::Path,
+            ValueKind::EnvVar,
+            ValueKind::Version,
+            ValueKind::Hostname,
+            ValueKind::Container,
+            ValueKind::NumericCfg,
+        ] {
+            assert_eq!(ValueKind::parse(k.as_str()), Some(k));
+        }
+    }
+
     fn known(kind: ValueKind, anchor: &str, value: &str) -> KnownValue {
         KnownValue {
             kind,

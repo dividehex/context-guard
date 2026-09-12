@@ -243,8 +243,8 @@ Each chat completion is one **turn**. For every turn:
    below that reset recommended. The lights follow the same scale, for health
    and for context pressure.
 
-Every result stores the reasons, so `Σ penalties == risk` always holds and
-nothing is a magic number. Weights, thresholds and the window live in
+Every result stores the reasons, so `risk == min(Σ penalties, 100)` always
+holds and nothing is a magic number. Weights, thresholds and the window live in
 configuration (`config/context-guard.example.toml`), not in code.
 
 ### Known-value drift, precisely
@@ -367,7 +367,7 @@ specific conflicting values (e.g. `8080` vs `8000`).
 
 ```sh
 cargo build --release
-cargo test                                   # 51 unit + integration tests, temp SQLite
+cargo test                                   # 65 unit + integration tests, temp SQLite; also spawns the real binary
 cargo clippy --all-targets -- -D warnings
 docker build -t context-guard .              # multi-stage; runtime is debian-slim, uid 10001
 ```
@@ -389,6 +389,9 @@ scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model> [
 
 `docs/ui-demo.md` is the interactive version: messages to type into an Open
 WebUI chat, each with the status line it produces.
+
+CI (`.github/workflows/ci.yml`) runs rustfmt, clippy, the Rust tests, the
+filter tests, and a build-and-smoke-test of the Docker image on every push.
 
 ## Current limitations
 

@@ -21,7 +21,7 @@ use tower::ServiceExt;
 pub struct Harness {
     pub router: Router,
     pub state: AppState,
-    _dir: tempfile::TempDir,
+    pub dir: tempfile::TempDir,
 }
 
 pub async fn harness() -> Harness {
@@ -29,6 +29,15 @@ pub async fn harness() -> Harness {
 }
 
 pub async fn harness_with(tweak: impl FnOnce(&mut Config)) -> Harness {
+    harness_full(tweak, true).await
+}
+
+/// A harness whose ingest queue is never drained, for back-pressure tests.
+pub async fn harness_without_worker(tweak: impl FnOnce(&mut Config)) -> Harness {
+    harness_full(tweak, false).await
+}
+
+async fn harness_full(tweak: impl FnOnce(&mut Config), spawn_worker: bool) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config {
         database: dir.path().join("cg.db"),
@@ -41,7 +50,11 @@ pub async fn harness_with(tweak: impl FnOnce(&mut Config)) -> Harness {
     let metrics = Arc::new(Metrics::new());
     let (tx, rx) = tokio::sync::mpsc::channel(config.queue_size);
     let monitor = Monitor::new(db.clone(), config.clone(), metrics.clone());
-    tokio::spawn(worker::run(rx, monitor, config.clone(), metrics.clone()));
+    if spawn_worker {
+        tokio::spawn(worker::run(rx, monitor, config.clone(), metrics.clone()));
+    } else {
+        std::mem::forget(rx); // keep the channel open so sends succeed until the queue is full
+    }
     let state = AppState {
         db,
         tx,
@@ -52,7 +65,7 @@ pub async fn harness_with(tweak: impl FnOnce(&mut Config)) -> Harness {
     Harness {
         router: api::router(state.clone()),
         state,
-        _dir: dir,
+        dir,
     }
 }
 

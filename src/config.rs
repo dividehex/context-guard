@@ -338,6 +338,59 @@ mod tests {
     }
 
     #[test]
+    fn every_variable_parses_and_every_bad_value_is_an_error() {
+        let cfg = Config::from_env(&env(&[
+            ("CONTEXT_GUARD_METRICS_LISTEN", "0.0.0.0:7433"),
+            ("CONTEXT_GUARD_DATABASE", "/tmp/x.db"),
+            ("CONTEXT_GUARD_MAX_BODY_BYTES", "1024"),
+            ("CONTEXT_GUARD_LOG_PAYLOADS", "yes"),
+            ("CONTEXT_GUARD_LOG_JSON", "on"),
+            ("CONTEXT_GUARD_CAPTURE_DIR", "/tmp/cap"),
+            ("CONTEXT_GUARD_TRUST_TRACE_ID", "1"),
+            ("CONTEXT_GUARD_CONTAINER_PREFIXES", "ai-, svc-, ,"),
+            ("CONTEXT_GUARD_QUEUE_SIZE", "5"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.metrics_listen.as_deref(), Some("0.0.0.0:7433"));
+        assert_eq!(cfg.database, PathBuf::from("/tmp/x.db"));
+        assert_eq!(cfg.max_body_bytes, 1024);
+        assert!(cfg.log_payloads && cfg.log_json && cfg.trust_trace_id);
+        assert_eq!(cfg.capture_dir, Some(PathBuf::from("/tmp/cap")));
+        assert_eq!(
+            cfg.container_prefixes,
+            vec!["ai-".to_string(), "svc-".to_string()]
+        );
+        assert_eq!(cfg.queue_size, 5);
+
+        for (name, value) in [
+            ("CONTEXT_GUARD_MAX_BODY_BYTES", "big"),
+            ("CONTEXT_GUARD_LOG_PAYLOADS", "maybe"),
+            ("CONTEXT_GUARD_LOG_JSON", "2"),
+            ("CONTEXT_GUARD_TRUST_TRACE_ID", "sure"),
+            ("CONTEXT_GUARD_STORE_MESSAGES", ""),
+            ("CONTEXT_GUARD_MODEL_LIMITS", "m=lots"),
+            ("CONTEXT_GUARD_CONFIG", "/definitely/missing.toml"),
+        ] {
+            let result = Config::from_env(&env(&[(name, value)]));
+            if value.is_empty() {
+                assert!(result.is_ok(), "empty values mean unset");
+            } else {
+                let err = result
+                    .err()
+                    .unwrap_or_else(|| panic!("{name}={value} should fail"));
+                assert!(!err.to_string().is_empty());
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "[penalties]\nnot_a_signal = 1\n").unwrap();
+        assert!(
+            Config::from_env(&env(&[("CONTEXT_GUARD_CONFIG", bad.to_str().unwrap())])).is_err(),
+            "unknown keys are rejected"
+        );
+    }
+
+    #[test]
     fn toml_file_sets_weights_and_env_wins_for_limits() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cg.toml");

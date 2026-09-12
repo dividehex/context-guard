@@ -436,6 +436,46 @@ mod tests {
         assert_eq!(line, "🟢 Context Guard 75 · good · 🟢 context 0% (446/122,880) · 1 drift · 1 suspicious id · 1 loop");
     }
 
+    /// Two hundred seeded random anomaly sets: the accounting identities hold for all of them.
+    #[test]
+    fn invariants_hold_for_random_anomaly_sets() {
+        let all = [
+            Signal::RepeatedToolCall,
+            Signal::ResponseLoop,
+            Signal::KnownValueDrift,
+            Signal::ToolResultWithoutCall,
+            Signal::ToolCallIdReferenceUnknown,
+            Signal::SuspiciousIdentifier,
+        ];
+        let p = Penalties::default();
+        let t = Thresholds::default();
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..200 {
+            let n = (next() % 12) as usize;
+            let anomalies: Vec<WindowAnomaly> = (0..n)
+                .map(|i| {
+                    let s = all[(next() % all.len() as u64) as usize];
+                    anomaly(s, p.for_signal(s), i as u32)
+                })
+                .collect();
+            let ctx = assess(Some(next() % 12_000), Some(10_000));
+            let s = score(&ctx, &anomalies, &p, &t);
+            let raw: u32 = s.reasons.iter().map(|r| r.penalty).sum();
+            assert_eq!(raw.min(100), s.risk, "risk is the reasons' sum, capped at 100");
+            assert_eq!(s.health + s.risk, 100);
+            assert!(s.risk <= 100);
+            assert_eq!(s.status, Status::for_health(s.health, &t));
+            assert_eq!(s, score(&ctx, &anomalies, &p, &t), "deterministic");
+            assert!(summary(&s, &ctx, &anomalies).chars().count() <= SUMMARY_BUDGET + 12);
+        }
+    }
+
     #[test]
     fn no_signals_means_healthy_with_no_reasons() {
         let s = score(

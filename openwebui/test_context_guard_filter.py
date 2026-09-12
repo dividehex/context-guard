@@ -161,3 +161,55 @@ def test_never_raises_on_garbage_emitter(stub):
     f = make_filter(stub.url)
     out = run(f.outlet(dict(BODY), broken, META))
     assert out == BODY
+
+
+def test_no_emitter_makes_no_request(stub):
+    f = make_filter(stub.url)
+    out = run(f.outlet(dict(BODY), None, META))
+    assert out == BODY
+    assert stub.requests == []
+
+
+def test_non_numeric_score_shows_status_without_notification(stub):
+    odd = {"score": "n/a", "status": "weird", "summary": "Context Guard ?"}
+    stub.responses["/api/v1/conversations/chat-1/health?message_id=msg-1"] = [(200, odd)]
+    f, em = make_filter(stub.url, notify_below=40), Emitter()
+    run(f.outlet(dict(BODY), em, META))
+    assert [e["type"] for e in em.events] == ["status"]
+
+
+def test_unknown_conversation_after_deadline_gives_up_quietly(stub):
+    unknown = (404, {"error": {"code": "unknown_conversation", "message": ""}})
+    stub.responses["/api/v1/conversations/chat-1/health?message_id=msg-1"] = [unknown]
+    stub.responses["/api/v1/conversations/chat-1/health?after=1757599999.000"] = [unknown]
+    f, em = make_filter(stub.url), Emitter()
+    f.valves.wait_seconds = 0.15
+    run(f.outlet(dict(BODY), em, META))
+    assert em.events == []
+
+
+def test_server_error_stops_polling_immediately(stub):
+    stub.responses["/api/v1/conversations/chat-1/health?message_id=msg-1"] = [(500, {})]
+    f, em = make_filter(stub.url), Emitter()
+    run(f.outlet(dict(BODY), em, META))
+    assert len(stub.requests) == 1
+    assert em.events == []
+
+
+def test_settle_stops_on_error_and_keeps_first_result(stub):
+    first = {"turn": 1, "score": 100, "status": "healthy", "summary": "first"}
+    stub.responses["/api/v1/conversations/chat-1/health?message_id=msg-1"] = [(200, first), (503, {})]
+    f, em = make_filter(stub.url, settle_seconds=0.05), Emitter()
+    run(f.outlet(dict(BODY), em, META))
+    assert em.events[0]["data"]["description"] == "first"
+
+
+def test_reply_timestamp_helpers():
+    assert Filter._reply_timestamp({"messages": [{"role": "assistant", "content": "x"}]}) is None
+    assert Filter._reply_timestamp({"messages": []}) is None
+    assert Filter._reply_timestamp({"messages": [{"role": "assistant", "timestamp": 5}]}) == 5.0
+    f = Filter()
+    f.valves.show_minimum = "bogus"
+    assert f._should_show("healthy")
+    f.valves.show_minimum = "watch"
+    assert f._should_show("unknown-status")

@@ -1,6 +1,8 @@
 //! Real LiteLLM v1.94.1 `generic_api` batches captured from the running stack
 //! (two turns of one chat sent through the proxy with Open WebUI-style headers).
 
+mod common;
+
 use context_guard::config::Config;
 use context_guard::telemetry::event::{EventKind, IdSource, Role};
 use context_guard::telemetry::litellm::{normalize, split_body};
@@ -51,4 +53,22 @@ fn real_streaming_turn_normalizes() {
     assert_eq!(ev.messages.len(), 3);
     assert_eq!(ev.messages[1].role, Role::Assistant);
     assert!(ev.response_text.as_deref().unwrap().contains("port 8000"));
+}
+
+#[tokio::test]
+async fn real_batches_flow_through_the_whole_pipeline() {
+    let h = common::harness().await;
+    for name in ["litellm-v1.94.1-turn1.json", "litellm-v1.94.1-turn2.json"] {
+        let (status, _) = h.post("/api/v1/ingest/litellm", fixture(name)).await;
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    }
+    let r = h
+        .wait_for_message("cg-smoke-1789217539", "msg-smoke-2")
+        .await;
+    assert_eq!(r["turn"], serde_json::json!(2));
+    assert_eq!(r["score"], serde_json::json!(100));
+    assert_eq!(r["context"]["limit"], serde_json::json!(122_880));
+    assert_eq!(r["context"]["prompt_tokens"], serde_json::json!(91));
+    assert_eq!(r["model"], serde_json::json!("qwen3-30b-a3b"));
+    assert_eq!(r["user_id"], serde_json::json!("user-smoke"));
 }
