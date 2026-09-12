@@ -200,13 +200,17 @@ config database, not in env files):
 The status line looks like:
 
 ```text
-🟡 Context Guard 74 · watch · 🟡 context 78% (25,624 / 32,768 tokens) · 1 known-value drift · 1 repeated operation
+🟡 Context Guard 74 · watch · 🟡 context 78% (25,624/32,768) · 1 drift · 1 repeated call
 ```
 
 The first light is the health status (🟢 healthy/good, 🟡 watch, 🟠 degraded,
 🔴 reset recommended); the second is context pressure on the same scale
 (🟢 below 70 %, 🟡 70–80 %, 🟠 80–90 %, 🔴 above 90 %, ⚪ unknown limit),
 followed by the prompt tokens of this request against the model's limit.
+Open WebUI shows the status on a single line with an ellipsis, so anomalies
+use short labels (`drift`, `suspicious id`, `loop`, `repeated call`, `orphan
+result`, `unknown call id`) and fold into `+N more` past about 96 characters.
+The full reasons are always in the API response.
 
 ## REST API
 
@@ -233,7 +237,7 @@ Health response:
     { "signal": "known_value_drift", "penalty": 15, "detail": "assistant said port of llama.cpp 8000 but the conversation established 8080" },
     { "signal": "repeated_tool_call", "penalty": 5, "detail": "restart called with identical arguments 3 times" }
   ],
-  "summary": "🟡 Context Guard 74 · watch · 🟡 context 78% (25,624 / 32,768 tokens) · 1 known-value drift · 1 repeated operation"
+  "summary": "🟡 Context Guard 74 · watch · 🟡 context 78% (25,624/32,768) · 1 drift · 1 repeated call"
 }
 ```
 

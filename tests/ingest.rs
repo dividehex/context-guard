@@ -27,7 +27,7 @@ async fn scores_turns_with_context_pressure_drift_and_tool_signals() {
     assert_eq!(r1["context"]["percent"], json!(20.0));
     assert_eq!(
         r1["summary"],
-        json!("🟢 Context Guard 100 · healthy · 🟢 context 20% (2,000 / 10,000 tokens)")
+        json!("🟢 Context Guard 100 · healthy · 🟢 context 20% (2,000/10,000)")
     );
 
     // Turn 2: 78% context and the assistant contradicts the port.
@@ -56,7 +56,7 @@ async fn scores_turns_with_context_pressure_drift_and_tool_signals() {
     assert_eq!(signals, vec!["context_70", "known_value_drift"]);
     assert_eq!(
         r2["summary"],
-        json!("🟢 Context Guard 80 · good · 🟡 context 78% (7,800 / 10,000 tokens) · 1 known-value drift")
+        json!("🟢 Context Guard 80 · good · 🟡 context 78% (7,800/10,000) · 1 drift")
     );
 
     // Turn 3: three identical tool calls in one reply and an orphan tool result in the request.

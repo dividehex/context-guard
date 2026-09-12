@@ -19,7 +19,7 @@ Start a **new chat** so the counters start from zero. Select `qwen3-30b-a3b`.
 For this chat: llama.cpp is running on port 8080 on host ai-llama-swap, its config is /etc/llama-swap/config.yaml, and the model is called qwen3-general. Acknowledge in one sentence.
 ```
 
-Expected: `🟢 Context Guard 100 · healthy · 🟢 context 0% (… / 122,880 tokens)`
+Expected: `🟢 Context Guard 100 · healthy · 🟢 context 0% (…/122,880)`
 
 ## 2. Known-value drift (−15)
 
@@ -27,7 +27,7 @@ Expected: `🟢 Context Guard 100 · healthy · 🟢 context 0% (… / 122,880 t
 Formatting test. Reply with exactly this sentence and nothing else, where N is 8080 minus 80 written as a plain number: "Your llama.cpp server on port N looks healthy."
 ```
 
-Expected: `🟢 Context Guard 85 · good · … · 1 known-value drift`
+Expected: `🟢 Context Guard 85 · good · … · 1 drift`
 
 The assistant states a port for llama.cpp that you never stated. (In the
 verification run the model answered 7280 instead of 8000. Still drift.)
@@ -38,7 +38,7 @@ verification run the model answered 7280 instead of 8000. Still drift.)
 Formatting test. Reply with exactly this sentence and nothing else, joining the two quoted parts with no space: "I switched the model to qwen3-general-" + "v2 as requested."
 ```
 
-Expected: `🟢 Context Guard 80 · good · … · 1 known-value drift · 1 suspicious identifier`
+Expected: `🟢 Context Guard 80 · good · … · 1 drift · 1 suspicious id`
 
 `qwen3-general-v2` resembles the known `qwen3-general` but was never mentioned
 by you (your message only contains `qwen3-general-` and `v2` separately).
@@ -51,7 +51,7 @@ Send this **three times**:
 Reply with exactly this paragraph and nothing else: I have checked the configuration file and the service is running on the expected port with no errors reported in the logs at this time, so nothing needs to change right now.
 ```
 
-Expected after the third: `🟢 Context Guard 75 · good · … · 1 response loop`
+Expected after the third: `🟢 Context Guard 75 · good · … · 1 drift · 1 suspicious id · 1 loop`
 
 The first two identical replies are tolerated; the third makes it a loop.
 
@@ -66,7 +66,20 @@ python3 -c "print('The quick brown fox jumps over the lazy dog near the river ba
 
 Paste the contents of `/tmp/filler.txt` followed by `Reply with the single word OK.`
 
-Expected: `🟢 Context Guard 95 · healthy · 🟡 context 77% (9,4xx / 12,288 tokens)`
+If the chat has the terminal tool enabled (model Function Calling set to
+Native), you can skip the paste and let the tool output carry the filler into
+the context instead:
+
+```text
+Use the terminal to run exactly this command and include its complete output in your reply, then say OK:
+python3 -c "print('The quick brown fox jumps over the lazy dog near the river bank at dawn. ' * 550)"
+```
+
+The tool result becomes a `tool` message in the follow-up request, so that
+request's prompt tokens include the whole output and the status line shows the
+pressure.
+
+Expected: `🟢 Context Guard 95 · healthy · 🟡 context 77% (9,4xx/12,288)`
 
 The percentage in the status line tells you where you landed; if it is under
 70 %, paste a little more. Above 80 % turns the light orange (−10), above 90 %

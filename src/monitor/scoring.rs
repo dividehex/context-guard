@@ -70,6 +70,19 @@ impl Signal {
         }
     }
 
+    /// Short label for the one-line status summary.
+    pub fn short(self) -> &'static str {
+        match self {
+            Signal::Context70 | Signal::Context80 | Signal::Context90 => "context",
+            Signal::RepeatedToolCall => "repeated call",
+            Signal::ResponseLoop => "loop",
+            Signal::KnownValueDrift => "drift",
+            Signal::ToolResultWithoutCall => "orphan result",
+            Signal::ToolCallIdReferenceUnknown => "unknown call id",
+            Signal::SuspiciousIdentifier => "suspicious id",
+        }
+    }
+
     /// Bucket used by the API's `signals` counts and by Prometheus.
     pub fn family(self) -> SignalFamily {
         match self {
@@ -211,38 +224,51 @@ pub fn score(
     }
 }
 
-/// One line for the Open WebUI status widget, e.g.
-/// `🟢 Context Guard 92 · healthy · 🟡 context 74% (90,800 / 122,880 tokens) · 1 known-value drift`
+/// One line for the Open WebUI status widget, which renders a single line
+/// with an ellipsis (`line-clamp-1`), e.g.
+/// `🟢 Context Guard 92 · healthy · 🟡 context 74% (90,800/122,880) · 1 drift · 1 loop`
 ///
 /// Two lights: the first is the health status, the second the context-window
-/// pressure. Both use the same colour scale so a glance tells the story.
+/// pressure, on the same colour scale. Anomalies use short labels and are
+/// added while the line stays within `SUMMARY_BUDGET` characters; the rest
+/// collapse into `+N more`. The full reasons are in the API response.
 pub fn summary(score: &Score, context: &ContextAssessment, anomalies: &[WindowAnomaly]) -> String {
-    let mut parts = vec![
-        format!(
-            "{} Context Guard {}",
-            health_light(score.status),
-            score.health
-        ),
+    let mut line = format!(
+        "{} Context Guard {} · {} · {}",
+        health_light(score.status),
+        score.health,
         score.status.as_str().replace('_', " "),
-        context_phrase(context),
-    ];
-    let mut seen: Vec<(Signal, usize)> = Vec::new();
+        context_phrase(context)
+    );
+    let mut counts: Vec<(Signal, usize)> = Vec::new();
     for a in anomalies {
-        match seen.iter_mut().find(|(s, _)| *s == a.signal) {
+        match counts.iter_mut().find(|(s, _)| *s == a.signal) {
             Some((_, n)) => *n += 1,
-            None => seen.push((a.signal, 1)),
+            None => counts.push((a.signal, 1)),
         }
     }
-    for (signal, n) in seen {
-        let phrase = signal.phrase();
-        parts.push(if n == 1 {
-            format!("1 {phrase}")
+    let total = counts.len();
+    for (i, (signal, n)) in counts.iter().enumerate() {
+        let part = format!(" · {n} {}", signal.short());
+        let remaining = total - i;
+        let more = if remaining > 1 {
+            format!(" · +{} more", remaining - 1)
         } else {
-            format!("{n} {phrase}s")
-        });
+            String::new()
+        };
+        if line.chars().count() + part.chars().count() + more.chars().count() > SUMMARY_BUDGET
+            && i > 0
+        {
+            line.push_str(&format!(" · +{remaining} more"));
+            return line;
+        }
+        line.push_str(&part);
     }
-    parts.join(" · ")
+    line
 }
+
+/// Characters that fit on one status line at Open WebUI's default chat width.
+const SUMMARY_BUDGET: usize = 96;
 
 fn health_light(status: Status) -> &'static str {
     match status {
@@ -265,15 +291,14 @@ fn context_phrase(context: &ContextAssessment) -> String {
                 _ => "🔴",
             };
             format!(
-                "{light} context {pct:.0}% ({} / {} tokens)",
+                "{light} context {pct:.0}% ({}/{})",
                 with_commas(used),
                 with_commas(limit)
             )
         }
-        (_, Some(used), None) => format!(
-            "⚪ context unknown ({} tokens, no limit for this model)",
-            with_commas(used)
-        ),
+        (_, Some(used), None) => {
+            format!("⚪ context ? ({} tokens, limit unknown)", with_commas(used))
+        }
         _ => "⚪ context unknown".to_string(),
     }
 }
@@ -323,7 +348,7 @@ mod tests {
         assert_eq!(a.reasons[0].signal, "context_70");
         assert_eq!(
             summary(&a, &ctx, &anomalies),
-            "🟢 Context Guard 75 · good · 🟡 context 78% (7,820 / 10,000 tokens) · 1 known-value drift · 1 repeated operation"
+            "🟢 Context Guard 75 · good · 🟡 context 78% (7,820/10,000) · 1 drift · 1 repeated call"
         );
     }
 
@@ -340,7 +365,7 @@ mod tests {
         assert_eq!(s.status, Status::ResetRecommended);
         assert!(
             summary(&s, &assess(Some(9500), Some(10_000)), &anomalies).starts_with(
-                "🔴 Context Guard 0 · reset recommended · 🔴 context 95% (9,500 / 10,000 tokens)"
+                "🔴 Context Guard 0 · reset recommended · 🔴 context 95% (9,500/10,000)"
             )
         );
     }
@@ -360,6 +385,27 @@ mod tests {
     }
 
     #[test]
+    fn summary_stays_on_one_line_and_folds_the_rest() {
+        let p = Penalties::default();
+        let t = Thresholds::default();
+        let all = vec![
+            anomaly(Signal::KnownValueDrift, 15, 1),
+            anomaly(Signal::SuspiciousIdentifier, 5, 2),
+            anomaly(Signal::ResponseLoop, 5, 3),
+            anomaly(Signal::ToolResultWithoutCall, 20, 4),
+            anomaly(Signal::RepeatedToolCall, 5, 5),
+            anomaly(Signal::ToolCallIdReferenceUnknown, 25, 6),
+        ];
+        let ctx = assess(Some(446), Some(122_880));
+        let line = summary(&score(&ctx, &all, &p, &t), &ctx, &all);
+        assert!(line.chars().count() <= SUMMARY_BUDGET, "{line}");
+        assert_eq!(line, "🔴 Context Guard 25 · reset recommended · 🟢 context 0% (446/122,880) · 1 drift · +5 more");
+        let three = &all[..3];
+        let line = summary(&score(&ctx, three, &p, &t), &ctx, three);
+        assert_eq!(line, "🟢 Context Guard 75 · good · 🟢 context 0% (446/122,880) · 1 drift · 1 suspicious id · 1 loop");
+    }
+
+    #[test]
     fn no_signals_means_healthy_with_no_reasons() {
         let s = score(
             &assess(Some(10), Some(1000)),
@@ -369,7 +415,10 @@ mod tests {
         );
         assert_eq!(s.health, 100);
         assert!(s.reasons.is_empty());
-        assert_eq!(summary(&s, &assess(Some(1234567), None), &[]), "🟢 Context Guard 100 · healthy · ⚪ context unknown (1,234,567 tokens, no limit for this model)");
+        assert_eq!(
+            summary(&s, &assess(Some(1234567), None), &[]),
+            "🟢 Context Guard 100 · healthy · ⚪ context ? (1,234,567 tokens, limit unknown)"
+        );
         assert_eq!(with_commas(999), "999");
         assert_eq!(with_commas(1000), "1,000");
         assert_eq!(
