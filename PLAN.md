@@ -1,6 +1,6 @@
 # Context Guard — implementation plan
 
-Status: plan only, no code yet. Written 2026-09-12 after inspecting the running
+Status: implemented and deployed 2026-09-12 (v0.1.0); kept as the design record. Originally: plan only, no code yet. Written 2026-09-12 after inspecting the running
 `ai` stack (`~/ai/compose.yaml`), LiteLLM v1.94.1 inside `ai-litellm`, and
 Open WebUI v0.11.3 inside `ai-openwebui`. Revised the same day: Open WebUI is
 the primary consumer (a Filter shows the score under every reply); Prometheus
