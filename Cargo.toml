@@ -1,6 +1,6 @@
 [package]
 name = "context-guard"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Deterministic, out-of-band health monitor for LLM conversations"
 license = "MIT"
