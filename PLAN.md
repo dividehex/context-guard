@@ -2,7 +2,9 @@
 
 Status: plan only, no code yet. Written 2026-09-12 after inspecting the running
 `ai` stack (`~/ai/compose.yaml`), LiteLLM v1.94.1 inside `ai-litellm`, and
-Open WebUI v0.11.3 inside `ai-openwebui`.
+Open WebUI v0.11.3 inside `ai-openwebui`. Revised the same day: Open WebUI is
+the primary consumer (a Filter shows the score under every reply); Prometheus
+is optional.
 
 Context Guard is a deterministic, out-of-band health monitor for LLM
 conversations. It observes, records, analyzes, scores and reports. It never
@@ -16,13 +18,15 @@ sits in the inference path and never adds a single token to any prompt.
 
 | Fact | Consequence |
 |------|-------------|
-| LiteLLM `ghcr.io/berriai/litellm:v1.94.1`, config at `~/ai/config/litellm/config.yaml`, on network `ai-backend` | Context Guard joins `ai-backend`; LiteLLM reaches it as `http://context-guard:7432`. |
+| LiteLLM `ghcr.io/berriai/litellm:v1.94.1`, config at `~/ai/config/litellm/config.yaml`, on network `ai-backend` | Context Guard joins `ai-backend`; LiteLLM and Open WebUI reach it as `http://context-guard:7432`. |
 | Every model entry already declares `model_info.max_input_tokens` (12288 / 28672 / 122880) | LiteLLM's logging payload carries the context limit itself. Configured overrides stay possible but are not required. |
 | Open WebUI has `ENABLE_FORWARD_USER_INFO_HEADERS=true` | Every chat completion to LiteLLM already carries `X-OpenWebUI-Chat-Id` and `X-OpenWebUI-User-Id` (plus name/email/role) headers. |
 | Open WebUI `ENABLE_CONTEXT_COMPACTION=true` (threshold 22000 tokens) | `messages[]` can shrink mid-conversation. Known values must be persisted per conversation, never recomputed from the current `messages[]`. |
 | Open WebUI uses native function calling (`CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS=8`) | Tool calls appear as `tool_calls` in the assistant response; tool results appear as `role: tool` messages in the next request. Both are visible to LiteLLM logging. |
-| Open WebUI task calls (title, tags, follow-ups, query generation) also carry the chat id header | Must be excluded from turn counting and scoring or they poison the health of every chat. See 2.3. |
-| No Prometheus in `~/ai/compose.yaml`; the existing exporter (`ai-llama-metrics`, :9101) is scraped by an external Prometheus | `/metrics` must be reachable from outside the docker network, but the REST API exposes conversation-derived data. See 9. |
+| Open WebUI task calls (title, tags, follow-ups, query generation) also carry the chat id header | Must be excluded from turn counting and scoring or they poison the health of every chat. See 1.4. |
+| Open WebUI 0.11.3 runs **outlet filters inline** (`utils/middleware.py: outlet_filter_handler`) after the reply is persisted and the `chat:completion done` event is sent, and before the background title/tag tasks | A filter outlet can wait a few seconds for the score without delaying the visible reply. It receives `__event_emitter__` and `__metadata__` (chat_id, message_id). See 1.5. |
+| A `status` event is stored in the message's `statusHistory` (`socket/main.py`), and the frontend builds the next request from `id, role, content, info, timestamp, sources` only | A status line under the reply is UI-only and never enters `messages[]`. This is the display mechanism. |
+| Prometheus runs on another host on the LAN; it is not part of this compose project | `/metrics` is provided but optional. Nothing depends on Prometheus being present. |
 | No Rust toolchain on the host (`cargo` not found), Docker 29.8 present | Build and tests run in Docker by default. Installing rustup (user-level, no sudo) is recommended for a faster dev loop. |
 
 ### 1.2 The LiteLLM telemetry mechanism: built-in `generic_api` callback
@@ -34,13 +38,14 @@ LiteLLM v1.94.1 ships `litellm/integrations/generic_api/generic_api_callback.py`
   env `GENERIC_LOGGER_ENDPOINT`. No Python file, no image change.
 * It is a `CustomBatchLogger`: events are appended to an in-memory queue in
   the async success/failure hooks (which run **after** the response has been
-  delivered) and flushed every 5 s (`DEFAULT_FLUSH_INTERVAL_SECONDS`) or at
-  512 events (`DEFAULT_BATCH_SIZE`).
+  delivered) and flushed every `DEFAULT_FLUSH_INTERVAL_SECONDS` (default 5,
+  env-overridable; we set it to 1 so the score is ready when the Open WebUI
+  outlet asks for it) or at 512 events (`DEFAULT_BATCH_SIZE`).
 * Flush does a single `httpx` POST of a **JSON array** of
   `StandardLoggingPayload` objects. `max_retries` defaults to 0, every
   exception is swallowed with `verbose_logger.exception`, and the queue is
   cleared in `finally`. A dead Context Guard therefore costs LiteLLM nothing
-  but a log line every 5 s.
+  but a log line per flush.
 * Because it is instantiated as `GenericAPILogger()` with no arguments,
   `log_format`, timeout and headers can only come from env
   (`GENERIC_LOGGER_ENDPOINT`, `GENERIC_LOGGER_HEADERS`). The ingest endpoint
@@ -64,37 +69,46 @@ metadata.user_api_key_end_user_id, end_user
 Nothing else is invented. Fields absent from the payload are `None` in the
 normalized event and reported as "unknown".
 
-### 1.3 Getting the conversation id into the payload
+### 1.3 Getting the chat id and message id into the payload
 
 `StandardLoggingMetadata.requester_custom_headers` exists in the type but is
 hard-coded to `None` in this version (`litellm_logging.py:4630,5469`), so raw
-headers do **not** reach the payload. Two config-only paths were verified:
+headers do **not** reach the payload. The config-only path that works:
 
-1. **`extra_spend_tag_headers` (chosen).**
-   `litellm_settings.extra_spend_tag_headers: ["x-openwebui-chat-id", "x-openwebui-user-id"]`
-   makes `_get_extra_header_tags` append `"x-openwebui-chat-id: <uuid>"` to
-   `request_tags` for every request. Header names are lowercase because
-   Starlette lowercases them before LiteLLM stores them. Nothing changes on
-   the Open WebUI side.
-2. **Session-id header (alternative).** LiteLLM treats any `x-*-session-id`
-   header whose value is ≥8 `[A-Za-z0-9_-]` chars as a chain id and copies it
-   into `trace_id`. Open WebUI can emit one via a per-connection custom header
-   `X-OpenWebUI-Session-Id: {{CHAT_ID}}` (Admin → Settings → Connections →
-   the LiteLLM connection → Headers). Documented as an alternative for people
-   who prefer not to touch LiteLLM tags.
+**`extra_spend_tag_headers`.**
+`litellm_settings.extra_spend_tag_headers: [x-openwebui-chat-id, x-openwebui-user-id, x-openwebui-message-id, x-openwebui-task]`
+makes `_get_extra_header_tags` append `"x-openwebui-chat-id: <uuid>"` etc. to
+`request_tags` for every request. Header names are lowercase because Starlette
+lowercases them before LiteLLM stores them.
+
+`X-OpenWebUI-Chat-Id` and `X-OpenWebUI-User-Id` are sent automatically today.
+`X-OpenWebUI-Message-Id` and `X-OpenWebUI-Task` are **not** sent by 0.11.3's
+OpenAI router, but the connection's custom headers support templates
+(`utils/headers.py: parse_custom_headers`): `{{CHAT_ID}}`, `{{MESSAGE_ID}}`,
+`{{TASK}}`, `{{USER_ID}}`. Two headers are added on the LiteLLM connection in
+Admin → Settings → Connections:
+
+```text
+X-OpenWebUI-Message-Id   {{MESSAGE_ID}}     lets the filter fetch exactly its own turn
+X-OpenWebUI-Task         {{TASK}}           lets Context Guard skip task calls
+```
+
+An alternative that needs no LiteLLM tag config: any `x-*-session-id`
+header becomes LiteLLM's `trace_id` (`X-OpenWebUI-Session-Id: {{CHAT_ID}}`).
+Documented as an alternative only.
 
 Identifier precedence in Context Guard (documented in the README):
 
 ```text
 1. request_tags "x-openwebui-chat-id: …"      stable per Open WebUI chat
-2. trace_id when it came from a session header (only if 1 is absent
-   and trace_id is not a LiteLLM-generated per-request uuid: we cannot tell
-   these apart, so this tier is opt-in via CONTEXT_GUARD_TRUST_TRACE_ID=true)
+2. trace_id, only with CONTEXT_GUARD_TRUST_TRACE_ID=true (LiteLLM-generated
+   per-request uuids are indistinguishable from session-header values)
 3. fallback: sha256(user_id | model | first user message) truncated,
    prefixed "fallback:"  — fragile by design, logged at warn on first use
 ```
 
 User id comes from the `x-openwebui-user-id` tag, else `end_user`.
+Message id comes from the `x-openwebui-message-id` tag, else `None`.
 
 ### 1.4 Excluding Open WebUI task calls
 
@@ -103,14 +117,35 @@ same connection with `metadata.task` set and `chat_id` set, so they carry the
 chat header too. LiteLLM cannot see `metadata.task` (Open WebUI pops
 `metadata` from the outbound body). Two layers:
 
-* **Recommended, deterministic:** add the custom header
-  `X-OpenWebUI-Task: {{TASK}}` on the Open WebUI connection and tag it in
-  LiteLLM (`extra_spend_tag_headers` gains `x-openwebui-task`). A non-empty
-  task tag ⇒ event is recorded as `kind = task` and skipped for scoring.
+* **Deterministic:** the `X-OpenWebUI-Task: {{TASK}}` header from 1.3. A
+  non-empty task tag ⇒ event is recorded as `kind = task` and skipped for scoring.
 * **Fallback heuristic when the tag is absent:** `stream == false` **and**
   `messages` contains exactly one `user` message and no `assistant` message.
-  Real Open WebUI chats stream. This is a heuristic and is labelled as such
-  in the README; the header makes it unnecessary.
+  Real Open WebUI chats stream. Labelled as a heuristic in the README.
+
+### 1.5 The Open WebUI display path: a Filter function
+
+Verified in `utils/middleware.py`:
+
+```text
+stream finishes
+→ message persisted, chat:completion {done: true} emitted   (user sees the finished reply)
+→ outlet_filter_handler(ctx)                                 ← our filter runs here
+     extra_params: __event_emitter__, __event_call__, __user__, __metadata__, __request__, __model__
+     __metadata__ has chat_id, message_id, session_id
+→ background_tasks_handler(ctx)                              (title, tags, follow-ups)
+```
+
+So an outlet that waits up to a few seconds delays only the title/tag
+generation, never the reply. `__event_emitter__({"type": "status", ...})` is
+persisted to `statusHistory` on that message and rendered as the small status
+line under the reply, exactly like the "Searching the web…" line. It is never
+part of `content`, never sent to the model, and survives page reload.
+
+The filter must be unable to break a chat: every network call wrapped in
+try/except with short timeouts, and a total wait budget. If Context Guard is
+down, the outlet returns the body unchanged after at most one failed
+connection attempt (~1 s).
 
 ---
 
@@ -118,19 +153,22 @@ chat header too. LiteLLM cannot see `metadata.task` (Open WebUI pops
 
 ```text
 Open WebUI ──► LiteLLM ──► llama-swap / fury llama-swap
-                 │
-                 │  generic_api batch logger (async, after response, fire-and-forget)
-                 │  POST http://context-guard:7432/api/v1/ingest/litellm   [JSON array]
-                 ▼
-          Context Guard (Rust, one container, ai-backend network)
-          ┌──────────────────────────────────────────────────────┐
-          │ axum HTTP ──► bounded mpsc (drop on full) ──► worker  │
-          │                                              │        │
-          │            SQLite (/data/context-guard.db) ◄─┘        │
-          │            monitor: context, repetition, known values,│
-          │                     identifiers, tools → scoring      │
-          │ REST API + /metrics (Prometheus) + /healthz            │
-          └──────────────────────────────────────────────────────┘
+   │             │
+   │             │  generic_api batch logger (async, after response, fire-and-forget)
+   │             │  POST http://context-guard:7432/api/v1/ingest/litellm   [JSON array]
+   │             ▼
+   │      Context Guard (Rust, one container, ai-backend network)
+   │      ┌──────────────────────────────────────────────────────┐
+   │      │ axum HTTP ──► bounded mpsc (drop on full) ──► worker  │
+   │      │                                              │        │
+   │      │            SQLite (/data/context-guard.db) ◄─┘        │
+   │      │            monitor: context, repetition, known values,│
+   │      │                     identifiers, tools → scoring      │
+   │      │ REST API  ·  /healthz  ·  /metrics (optional use)     │
+   │      └──────────────────────────────────────────────────────┘
+   │             ▲
+   │  outlet Filter: GET /api/v1/conversations/{chat_id}/health?message_id=…
+   └─────────────┘  then emits a UI-only `status` event under the reply
 ```
 
 Invariants enforced by construction:
@@ -146,6 +184,8 @@ Invariants enforced by construction:
   logged; the worker never exits and the process never panics on payload
   content (`serde_json::Value` + explicit `Option`s everywhere, no `unwrap`
   on input).
+* The filter reads; it never writes to Context Guard, never modifies
+  `body["messages"]`, and never raises.
 
 ---
 
@@ -163,6 +203,9 @@ Invariants enforced by construction:
 │   └── 0001_initial.sql
 ├── config/
 │   └── context-guard.example.toml  weights + model limits, all optional
+├── openwebui/
+│   ├── context_guard_filter.py     the Open WebUI Filter function (single file)
+│   └── install-filter.sh           optional: create/update it through the Open WebUI API
 ├── src/
 │   ├── main.rs          wiring: config → db → worker → axum
 │   ├── config.rs        env + optional TOML; weights, thresholds, model limits
@@ -174,7 +217,7 @@ Invariants enforced by construction:
 │   ├── telemetry/
 │   │   ├── litellm.rs   StandardLoggingPayload → ConversationEvent
 │   │   ├── event.rs     ConversationEvent, Message, ToolCall, ToolResult
-│   │   └── identity.rs  conversation id / user id / task detection
+│   │   └── identity.rs  conversation id / user id / message id / task detection
 │   ├── monitor/
 │   │   ├── mod.rs       Monitor: runs signals, persists, scores one event
 │   │   ├── context.rs   utilization + penalty
@@ -214,6 +257,7 @@ pub struct ConversationEvent {
     pub conversation_id: String,
     pub conversation_id_source: IdSource, // ChatTag | TraceId | Fallback
     pub user_id: Option<String>,
+    pub message_id: Option<String>,   // Open WebUI assistant message id, from tag
     pub model: String,                // model_group if set, else model
     pub request_id: Option<String>,   // litellm_call_id
     pub timestamp: DateTime<Utc>,     // endTime
@@ -237,6 +281,12 @@ truncates them). Reasoning fields are ignored.
 Turn number = number of `Chat` events previously recorded for the
 conversation + 1. It is assigned by the worker, not derived from
 `messages.len()`, because compaction changes the latter.
+
+Tool-calling iterations: Open WebUI makes one LiteLLM call per iteration
+(assistant asks for a tool, results are appended, the model is called again).
+Each call is one event and one turn; they share the same `message_id`. The
+filter asks for the **latest** result for its message id, so the score
+shown reflects the final iteration of that reply.
 
 ---
 
@@ -282,8 +332,8 @@ produce **claims**, never facts.
 Extractors (each yields `kind`, `value`, and an optional `anchor`):
 
 ```text
-ipv4        \b(?:\d{1,3}\.){3}\d{1,3}\b   (octets ≤ 255; skip version-like 1.2.3.4 only when preceded by "v")
-ipv6        RFC-ish bracketed or ::-containing hex groups; validated with std::net::Ipv6Addr
+ipv4        \b(?:\d{1,3}\.){3}\d{1,3}\b   (octets ≤ 255; skipped when preceded by "v")
+ipv6        bracketed or ::-containing hex groups; validated with std::net::Ipv6Addr
 port        (?i)\bport\s*[:=#]?\s*(\d{2,5})\b   or   host:PORT after an ipv4/hostname   or --port=N
 url         https?://[^\s<>"')]+           (host and port also registered as their own kinds)
 path        (?:^|[\s"'`(=:])(/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+)   (≥ 2 segments)
@@ -400,10 +450,10 @@ degraded = 40
 conversations      (id PK, id_source, user_id, model, first_seen, last_seen,
                     turns, last_health, last_risk, last_status, last_context_percent)
 conversation_events(id PK /* LiteLLM id */, conversation_id FK, turn, kind, ts, model,
-                    prompt_tokens, completion_tokens, context_limit,
+                    message_id, prompt_tokens, completion_tokens, context_limit,
                     response_text, new_messages_json /* messages not seen in the previous turn */,
                     full_messages_json NULL /* only when CONTEXT_GUARD_STORE_MESSAGES=true */)
-health_results     (id PK, conversation_id FK, turn, ts, health, risk, status,
+health_results     (id PK, conversation_id FK, turn, ts, message_id, health, risk, status,
                     context_percent, reasons_json)
 known_values       (id PK, conversation_id FK, kind, anchor, value, source_role,
                     first_turn, last_turn, occurrences, UNIQUE(conversation_id, kind, anchor, value))
@@ -416,6 +466,7 @@ anomalies          (id PK, conversation_id FK, turn, ts, signal, penalty, severi
 ```
 
 * `conversation_events.id` unique ⇒ redelivered batches are idempotent.
+* Index on `health_results(conversation_id, message_id)` for the filter's lookup.
 * Storing only the message delta keeps the DB size roughly linear in
   conversation length instead of quadratic. Full messages are opt-in.
 * Retention job: every hour delete conversations (and cascaded rows) with
@@ -437,7 +488,6 @@ Environment variables (all optional):
 
 ```text
 CONTEXT_GUARD_LISTEN=0.0.0.0:7432
-CONTEXT_GUARD_METRICS_LISTEN=                 # optional second listener serving only /metrics and /healthz
 CONTEXT_GUARD_DATABASE=/data/context-guard.db
 CONTEXT_GUARD_RETENTION_DAYS=30
 CONTEXT_GUARD_CONFIG=/data/context-guard.toml # optional; weights, thresholds, model limits
@@ -448,6 +498,7 @@ CONTEXT_GUARD_STORE_MESSAGES=false            # keep full messages[] per event
 CONTEXT_GUARD_LOG_PAYLOADS=false              # opt-in verbose payload logging (secrets redacted)
 CONTEXT_GUARD_TRUST_TRACE_ID=false            # accept LiteLLM trace_id as conversation id (see 1.3)
 CONTEXT_GUARD_CONTAINER_PREFIXES=ai-          # identifier extraction hint
+CONTEXT_GUARD_METRICS_LISTEN=                 # optional extra listener serving only /metrics and /healthz (see 9)
 RUST_LOG=info
 ```
 
@@ -468,15 +519,35 @@ POST /api/v1/ingest/litellm        JSON array | object | NDJSON of StandardLoggi
 GET  /healthz                      {status, database, queue_depth, uptime_s}
 GET  /api/v1/conversations         ?limit=50&status=watch  → recent conversations with current score
 GET  /api/v1/conversations/{id}/health
+        ?message_id=X              → the result for that Open WebUI message (latest iteration),
+                                     404 {code: "not_scored_yet"} until it exists
+        ?after=<unix seconds>      → latest result whose event time ≥ after, else 404 not_scored_yet
+        (no query)                 → latest result for the conversation
 GET  /api/v1/conversations/{id}/history      health results (and anomalies) in turn order
-GET  /metrics                      Prometheus text format
+GET  /metrics                      Prometheus text format (optional to use)
 ```
 
-Responses match the shapes in the specification. Errors are
-`{ "error": { "code": "...", "message": "..." } }`. The router is built so a
-bearer-token middleware layer can be added around `/api/v1/*` later without
-touching handlers; V1 has no authentication, the compose example binds to
-`127.0.0.1`.
+Responses match the shapes in the specification; the health response also
+carries `message_id`, `turn` and a one-line `summary` string that the filter
+can display verbatim, e.g.
+
+```text
+Context Guard 74 · watch · context 78% · 1 known-value drift · 1 repeated operation
+```
+
+so the display text is defined in one place (Rust) and the filter stays dumb.
+
+Errors are `{ "error": { "code": "...", "message": "..." } }`. The router is
+built so a bearer-token middleware layer can be added around `/api/v1/*`
+later without touching handlers; V1 has no authentication.
+
+Network exposure: Open WebUI and LiteLLM reach Context Guard by container
+name over `ai-backend`, so the container needs **no published port at all**
+for the primary use case. The compose example publishes `127.0.0.1:7432` for
+curl/debugging only. For the LAN Prometheus there are two documented options:
+bind `0.0.0.0:7432` (exposes the API too, unauthenticated) or set
+`CONTEXT_GUARD_METRICS_LISTEN=0.0.0.0:7433` and publish only 7433. The extra
+listener is ~25 lines and off by default; Prometheus is never required.
 
 Prometheus metrics (no conversation ids as labels):
 
@@ -496,23 +567,67 @@ context_guard_ingest_batch_size                    histogram
 context_guard_queue_depth
 ```
 
-Because your Prometheus is outside this compose project, the recommended
-deployment publishes `/metrics` on a second listener
-(`CONTEXT_GUARD_METRICS_LISTEN=0.0.0.0:7433`, exposed as `7433:7433`) and
-keeps the REST API on `127.0.0.1:7432`. That keeps conversation-derived data
-off the LAN while metrics remain scrapeable. Both listeners are the same axum
-binary; the second one mounts two routes.
+---
+
+## 10. The Open WebUI Filter (`openwebui/context_guard_filter.py`)
+
+One file, installed as a **global** Filter (Admin → Functions → import, then
+toggle Global) so it applies to every model without per-model setup. No
+`inlet`, no `stream` hook; only `outlet`. Valves:
+
+```text
+context_guard_url   http://context-guard:7432
+wait_seconds        6.0     total budget to wait for the score
+poll_interval       0.5
+connect_timeout     1.0     per request
+show_minimum        always | watch | degraded   (when to show the line; default always)
+notify_below        40      toast (`notification` event) when health drops under this; 0 disables
+```
+
+Outlet logic:
+
+```text
+chat_id, message_id ← __metadata__
+if either is missing → return body unchanged
+deadline = now + wait_seconds
+loop:
+    GET {url}/api/v1/conversations/{chat_id}/health?message_id={message_id}
+        (fallback when the message-id header is not configured:
+         ?after=<timestamp of the last assistant message in body["messages"]>)
+    200 → emit status {description: result.summary, done: true}; optional notification; break
+    404 not_scored_yet → sleep poll_interval, retry until deadline
+    any other error / connection refused / timeout → log at debug, break   (do not retry; Guard may be down)
+return body unchanged                                                       (always)
+```
+
+Guarantees: `body` is returned by reference untouched; the emitter is only
+called for `status`/`notification` events, never `message`/`replace`; a broken
+or absent Context Guard costs at most `connect_timeout` per reply and shows
+nothing. The status line is stored in `statusHistory`, which is not part of
+what the frontend sends as `messages` (verified: it sends
+`id, role, content, info, timestamp, sources`), so the score never reaches
+the model.
+
+Why `wait_seconds` is enough: with `DEFAULT_FLUSH_INTERVAL_SECONDS=1` on
+LiteLLM the payload arrives ≤ 1 s after the reply completes, and scoring one
+event is milliseconds. The default 6 s budget covers the default 5 s flush
+interval too, for people who do not change LiteLLM's flush setting.
+
+`openwebui/install-filter.sh` (optional) creates or updates the function via
+`POST /api/v1/functions/create` / `POST /api/v1/functions/id/{id}/update`
+with an admin API key, so the filter can be redeployed from the repo. Manual
+import through the UI is the documented primary path.
 
 ---
 
-## 10. Docker
+## 11. Docker
 
 * `Dockerfile`: stage 1 `rust:1-bookworm` builds with `cargo build --release`
   using a dependency-caching layer (copy `Cargo.toml`/`Cargo.lock`, build a
   dummy main, then copy `src`). SQLite is statically linked via
   `libsqlite3-sys` bundled feature. Stage 2 `debian:bookworm-slim` with
   `ca-certificates` only, user `context-guard` (uid 10001), `/data` owned by
-  it, `EXPOSE 7432 7433`, `HEALTHCHECK` runs `context-guard healthcheck`
+  it, `EXPOSE 7432`, `HEALTHCHECK` runs `context-guard healthcheck`
   (a subcommand of the same binary that GETs `/healthz`, so no curl/wget in the image).
 * `docker-compose.example.yml`:
 
@@ -525,14 +640,12 @@ binary; the second one mounts two routes.
     restart: unless-stopped
     user: "10001:10001"
     ports:
-      - "127.0.0.1:7432:7432"     # REST API (conversation-derived data)
-      - "7433:7433"               # /metrics only, for the external Prometheus
+      - "127.0.0.1:7432:7432"     # debugging only; Open WebUI and LiteLLM use the container name
     volumes:
       - ./data/context-guard:/data
     environment:
       RUST_LOG: info
       CONTEXT_GUARD_DATABASE: /data/context-guard.db
-      CONTEXT_GUARD_METRICS_LISTEN: 0.0.0.0:7433
       CONTEXT_GUARD_RETENTION_DAYS: "30"
     networks:
       - ai-backend
@@ -544,6 +657,7 @@ LiteLLM side (`~/ai/compose.yaml` and `config/litellm/config.yaml`):
   litellm:
     environment:
       GENERIC_LOGGER_ENDPOINT: http://context-guard:7432/api/v1/ingest/litellm
+      DEFAULT_FLUSH_INTERVAL_SECONDS: "1"     # affects only batch loggers; generic_api is the only one in use
 ```
 
 ```yaml
@@ -552,6 +666,7 @@ litellm_settings:
   extra_spend_tag_headers:
     - x-openwebui-chat-id
     - x-openwebui-user-id
+    - x-openwebui-message-id
     - x-openwebui-task
 ```
 
@@ -560,13 +675,16 @@ the container exists. Applying the LiteLLM change requires
 `docker compose up -d litellm` (config file is bind-mounted; a restart is
 enough, no rebuild).
 
-Open WebUI side (optional but recommended, UI only): on the LiteLLM
-connection add header `X-OpenWebUI-Task` = `{{TASK}}`. No env or compose
-change; `ENABLE_FORWARD_USER_INFO_HEADERS` is already on.
+Open WebUI side, all through the admin UI, no env or compose change:
+
+1. Connections → the LiteLLM connection → Headers: add
+   `X-OpenWebUI-Message-Id = {{MESSAGE_ID}}` and `X-OpenWebUI-Task = {{TASK}}`.
+2. Functions → import `openwebui/context_guard_filter.py` → enable → Global.
+3. Set the `context_guard_url` valve if the container name differs.
 
 ---
 
-## 11. Tests
+## 12. Tests
 
 Unit (in-module `#[cfg(test)]`, no SQLite needed thanks to the repository trait):
 
@@ -583,96 +701,117 @@ Unit (in-module `#[cfg(test)]`, no SQLite needed thanks to the repository trait)
   matching id ⇒ none; unknown call-id reference in text.
 * `scoring`: same anomaly set ⇒ identical risk on repeated runs; health
   clamped at 0 with an absurd anomaly set; `Σ reasons.penalty == risk`;
-  window drops anomalies older than W turns; status boundaries.
+  window drops anomalies older than W turns; status boundaries; `summary`
+  string is stable for a given result.
 * `telemetry::litellm`: real fixture payloads (captured in step 2, redacted)
   map to the expected `ConversationEvent`, including a tool-calling turn,
   a compacted turn, a task call, and a failure.
-* `identity`: tag parsing, precedence, fallback hashing is stable.
+* `identity`: tag parsing (chat, user, message, task), precedence, fallback hashing is stable.
 
 Integration (`tests/`, real SQLite in a temp dir, axum served on an ephemeral port):
 
-* POST a fixture sequence, then `GET …/health` and `…/history` return the
-  expected scores and reasons; second identical POST changes nothing (idempotent).
+* POST a fixture sequence, then `GET …/health?message_id=` returns 404
+  `not_scored_yet` before and 200 after the matching event; `…/history`
+  returns the expected scores and reasons; second identical POST changes nothing.
 * Fault tolerance: invalid JSON, JSON of the wrong shape, an array with one
   good and one garbage item, 40 MiB body, deeply nested JSON, strings with
   NUL bytes and invalid UTF-8 surrogates ⇒ process keeps serving, counters
   move, `/healthz` stays 200.
 * Retention deletes an old conversation and keeps a fresh one.
 
+Filter (`openwebui/test_context_guard_filter.py`, plain `pytest` + a stub
+HTTP server on localhost, run in a throwaway `python:3.12-alpine` container):
+
+* 200 on first poll ⇒ one `status` event with the summary, body returned unchanged (same object).
+* 404 then 200 ⇒ polls and shows.
+* connection refused ⇒ no event, no exception, returns within `connect_timeout`.
+* missing `message_id` ⇒ no request made.
+
 `cargo test` runs inside the builder image when no host toolchain exists:
 `docker run --rm -v "$PWD":/src -v cargo-cache:/usr/local/cargo/registry -w /src rust:1-bookworm cargo test`.
 
 ---
 
-## 12. Delivery order and commits
+## 13. Delivery order and commits
 
 Each step ends with a signed commit (global `gpgsign` is on).
 
-1. **Repo bootstrap** — `git init`, this plan, `.gitignore`, `Cargo.toml`,
+1. **Repo bootstrap** — this plan, `.gitignore`, `Cargo.toml`,
    `src/main.rs` serving `/healthz`, Dockerfile skeleton. Commit.
 2. **Capture real telemetry** — temporarily point `GENERIC_LOGGER_ENDPOINT`
    at a throwaway listener (a `python:3.12-alpine` container on `ai-backend`
    running a 20-line `http.server` that writes bodies to a file), enable
-   `callbacks: ["generic_api"]` and the tags, run one normal chat, one
-   tool-calling chat, and wait for a title generation. Redact and store as
-   `tests/fixtures/*.json`. This is where the tag names and the task
-   heuristic are confirmed against reality. Remove the listener. Commit fixtures.
+   `callbacks: ["generic_api"]`, the four tags and the two Open WebUI
+   connection headers, run one normal chat, one tool-calling chat, and wait
+   for a title generation. Confirms the tag names, the message-id header and
+   the task heuristic against reality. Redact and store as
+   `tests/fixtures/*.json`. Remove the listener. Commit fixtures.
 3. **Telemetry ingestion** — `telemetry/`, `worker.rs`, `api/ingest.rs`,
    bounded channel, counters. Fixture-driven unit tests. Commit.
 4. **SQLite persistence** — migrations, `database/`, retention job,
    graceful-degradation behaviour, event dedupe. Integration test. Commit.
 5. **Context utilization** + config loading (`config.rs`, TOML, model limits). Tests. Commit.
-6. **Repetition** (tool-call keys, shingles/Jaccard). Tests. Commit.
-7. **Known values + identifiers** (extractors, registries, drift rules). Tests. Commit.
-8. **Tool ledger and anomalies.** Tests. Commit.
-9. **Scoring + health history** (window, reasons, thresholds). Tests. Commit.
-10. **REST API** (list, health, history) + error shape. Integration tests. Commit.
-11. **Prometheus metrics** + optional metrics listener. Commit.
-12. **Docker packaging** — finished Dockerfile, compose example, healthcheck
-    subcommand; build the image and run it against the fixtures. Commit.
-13. **Deploy to the `ai` stack** — add the service to `~/ai/compose.yaml`
-    (backup first, as with every prior change), set the LiteLLM env and
-    config, `docker compose up -d context-guard && docker compose up -d litellm`,
-    watch a real chat score itself. Fix what reality disagrees with. Commit.
-14. **README** — everything in the specification's list, the two verbatim
-    disclaimers, limitations, scoring walkthrough, the Open WebUI
-    optional-header note and the optional future UI integration note
-    (Open WebUI "Functions" can attach UI-only status via event emitters
-    without touching `messages[]`; documented, not built).
-15. **Full test pass** (`cargo test`, `cargo clippy -D warnings`,
-    `cargo fmt --check`), fix failures, tag `v0.1.0`.
+6. **Scoring + health history + REST API** (window, reasons, thresholds,
+   summary string, list/health/history with `message_id` and `after`
+   lookups). Pulled forward so the end-to-end display path can be exercised
+   with context pressure alone. Integration tests. Commit.
+7. **Open WebUI filter** — `openwebui/context_guard_filter.py`, its tests,
+   install script. Commit.
+8. **Docker packaging + first deployment** — finished Dockerfile, compose
+   example, healthcheck subcommand; add the service to `~/ai/compose.yaml`
+   (backup first, as with every prior change), set the LiteLLM env and
+   config, import the filter, `docker compose up -d context-guard && docker compose up -d litellm`,
+   and watch a real chat show its score. Fix what reality disagrees with. Commit.
+9. **Repetition** (tool-call keys, shingles/Jaccard). Tests. Commit.
+10. **Known values + identifiers** (extractors, registries, drift rules). Tests. Commit.
+11. **Tool ledger and anomalies.** Tests. Commit.
+12. **Prometheus metrics** + optional metrics listener. Commit.
+13. **README** — everything in the specification's list, the two verbatim
+    disclaimers, limitations, scoring walkthrough, the filter install steps,
+    and the Open WebUI header setup.
+14. **Full test pass** (`cargo test`, `cargo clippy -D warnings`,
+    `cargo fmt --check`, filter pytest), redeploy, fix failures, tag `v0.1.0`.
 
-Steps 5–9 are independent of each other once 3 and 4 exist; they are still
-done in the listed order so each commit is reviewable on its own.
+Steps 9–11 add signals to an already-running display path, so each one can be
+verified in the UI as soon as it lands.
 
 ---
 
-## 13. Deviations from the specification, with reasons
+## 14. Deviations from the specification, with reasons
 
-* **Second listener for `/metrics`** (9): added because the existing
-  Prometheus is external while the spec asks to bind the API locally. It is
-  ~25 lines and avoids exposing conversation data on the LAN. Drop it if you
-  run Prometheus on this host.
-* **Message delta storage** (7): the spec asks to persist `conversation_events`;
-  storing every full `messages[]` would make the DB grow quadratically with
-  conversation length on 120k-context models. The delta plus an opt-in
-  full-copy switch keeps the data and the disk sane.
-* **Sliding window instead of a lifetime sum** (6): the spec's example shows
-  counts of signals per conversation; a lifetime sum would pin a long chat at
-  "reset recommended" forever after one bad patch. The window is a single
-  configurable integer, so the behaviour stays transparent.
-* **Task-call exclusion** (1.4): not in the spec, but without it every chat
-  gets 3–4 extra "turns" per user message from title/tag/follow-up
-  generation, and those turns would trip the loop detector.
+* **Open WebUI filter is in V1** (10): the specification made UI display an
+  optional future item; you have since made it the primary consumer. The
+  mechanism found (inline outlet + `status` event) satisfies the zero-context
+  invariant, so no departure from that rule is needed.
+* **`message_id` tag and lookup** (1.3, 9): not in the specification. Without
+  it the filter can only guess which score belongs to which reply by
+  timestamp; with it the match is exact. Costs one Open WebUI header and one
+  LiteLLM tag entry.
+* **`DEFAULT_FLUSH_INTERVAL_SECONDS=1` on LiteLLM** (11): purely to make the
+  score available within a second of the reply. Optional; the filter budget
+  covers the default 5 s too.
+* **Message delta storage** (7): storing every full `messages[]` would make
+  the DB grow quadratically with conversation length on 120k-context models.
+  The delta plus an opt-in full-copy switch keeps the data and the disk sane.
+* **Sliding window instead of a lifetime sum** (6): a lifetime sum would pin
+  a long chat at "reset recommended" forever after one bad patch. The window
+  is a single configurable integer, so the behaviour stays transparent.
+* **Task-call exclusion** (1.4): without it every chat gets 3–4 extra
+  "turns" per user message from title/tag/follow-up generation, and those
+  turns would trip the loop detector.
+* **Optional metrics-only listener** (9): off by default, exists only because
+  the LAN Prometheus would otherwise require exposing the unauthenticated
+  API. Prometheus is not required for anything.
 
-## 14. Open points (defaults chosen, change if you disagree)
+## 15. Open points (defaults chosen, change if you disagree)
 
-1. Prometheus host: assumed external; hence the 7433 metrics listener on
-   `0.0.0.0`. If Prometheus runs on this host, both listeners bind `127.0.0.1`.
-2. Host toolchain: the plan builds and tests in Docker. Installing rustup
-   (user-level, no sudo) would make `cargo test` take seconds instead of minutes;
-   recommended, not required.
-3. `X-OpenWebUI-Task: {{TASK}}` header: set through the Open WebUI admin UI
-   during step 13. Without it the stream/single-message heuristic is used.
+1. Host toolchain: the plan builds and tests in Docker. Installing rustup
+   (user-level, no sudo) would make `cargo test` take seconds instead of
+   minutes; recommended, not required.
+2. Status line format: `Context Guard 74 · watch · context 78% · …`. Shown on
+   every reply by default; the `show_minimum` valve can restrict it to
+   watch-or-worse.
+3. The two Open WebUI connection headers are set by hand in the admin UI
+   during step 8 (they live in Open WebUI's config DB, not in env).
 4. Retention default 30 days, full message storage off, verbose payload
    logging off.
