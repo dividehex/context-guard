@@ -21,6 +21,13 @@ each reply as a UI-only status line:
 > Context Guard does not add any messages, prompts, canaries, or health
 > information to the model's context.
 
+![Three Open WebUI replies with Context Guard status lines: 100 healthy after the user states facts, 85 with one drift after the assistant names the wrong port, 80 with a drift and a suspicious id after it names a near-duplicate model](docs/images/openwebui-status-lines.png)
+
+Three replies from the walkthrough in `docs/ui-demo.md`: the user states the
+facts (100, healthy), the assistant contradicts the port (85, one drift), then
+names a near-duplicate model (80, drift plus a suspicious id). The second light
+tracks context pressure separately, here 0% of the model's 122,880-token limit.
+
 It is never in the inference path. If it crashes, hangs, loses its database, or
 is removed, LiteLLM logs one line per flush and inference continues unchanged.
 
