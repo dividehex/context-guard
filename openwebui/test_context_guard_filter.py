@@ -89,6 +89,15 @@ def test_polls_until_scored(stub):
     assert em.events[0]["type"] == "status"
 
 
+def test_new_chat_unknown_then_scored(stub):
+    unknown = (404, {"error": {"code": "unknown_conversation", "message": ""}})
+    stub.responses["/api/v1/conversations/chat-1/health?message_id=msg-1"] = [unknown, unknown, (200, HEALTH)]
+    f, em = make_filter(stub.url), Emitter()
+    run(f.outlet(dict(BODY), em, META))
+    assert len(stub.requests) == 3
+    assert em.events and em.events[0]["type"] == "status"
+
+
 def test_timestamp_fallback_after_deadline(stub):
     not_yet = (404, {"error": {"code": "not_scored_yet", "message": ""}})
     stub.responses["/api/v1/conversations/chat-1/health?message_id=msg-1"] = [not_yet]

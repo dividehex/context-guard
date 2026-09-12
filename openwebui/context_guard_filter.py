@@ -126,12 +126,10 @@ class Filter:
                 status, payload = await self._get(session, by_message)
                 if status == 200:
                     return payload
-                if status == 404 and payload.get("error", {}).get("code") == "unknown_conversation" and by_time:
-                    used_fallback = True  # chat id tag missing; nothing to match on
-                    return None
                 if status == 404:
-                    # Not scored yet: keep polling. After the deadline, try the timestamp fallback once
-                    # in case the message-id header is not configured.
+                    # Not scored yet (or, for a brand-new chat, not even known yet: LiteLLM flushes
+                    # its batch up to a second after the reply). Keep polling. After the deadline,
+                    # try the timestamp fallback once in case the message-id header is not configured.
                     if time.monotonic() >= deadline:
                         if by_time and not used_fallback:
                             used_fallback = True
