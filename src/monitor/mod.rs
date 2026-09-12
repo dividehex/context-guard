@@ -78,7 +78,11 @@ impl Monitor {
             )
             .await?;
 
-        if event.kind != EventKind::Chat {
+        let overflow_tokens = match event.kind {
+            EventKind::Failure => context_overflow_tokens(event.error.as_deref()),
+            _ => None,
+        };
+        if event.kind != EventKind::Chat && overflow_tokens.is_none() {
             self.db
                 .insert_event(self.new_event(event, None, None))
                 .await?;
@@ -121,15 +125,24 @@ impl Monitor {
             .await?;
 
         let mut findings: Vec<Finding> = Vec::new();
-        let ctx = context::assess(event.prompt_tokens, event.context_limit);
-        self.learn_and_check_known_values(event, cid, turn, delta, &mut findings)
-            .await?;
-        self.learn_and_check_identifiers(event, cid, turn, delta, &mut findings)
-            .await?;
-        self.track_tools(event, cid, turn, delta, &mut findings)
-            .await?;
-        self.check_response_loop(event, cid, turn, &mut findings)
-            .await?;
+        let ctx = match overflow_tokens {
+            // A rejected request has no response to inspect; the overflow itself is the finding.
+            Some(reported) => {
+                context::overflow(reported.or(event.prompt_tokens), event.context_limit)
+            }
+            None => {
+                let ctx = context::assess(event.prompt_tokens, event.context_limit);
+                self.learn_and_check_known_values(event, cid, turn, delta, &mut findings)
+                    .await?;
+                self.learn_and_check_identifiers(event, cid, turn, delta, &mut findings)
+                    .await?;
+                self.track_tools(event, cid, turn, delta, &mut findings)
+                    .await?;
+                self.check_response_loop(event, cid, turn, &mut findings)
+                    .await?;
+                ctx
+            }
+        };
 
         for f in &findings {
             let inserted = self
@@ -501,6 +514,32 @@ impl Monitor {
     }
 }
 
+/// `Some(reported request size)` when a failure was the backend rejecting the
+/// request for exceeding its context window. The inner value is `None` when the
+/// error text does not state the size.
+fn context_overflow_tokens(error: Option<&str>) -> Option<Option<u64>> {
+    use std::sync::LazyLock;
+    static OVERFLOW_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?i)ContextWindowExceeded|context_length_exceeded|exceed_context_size|exceeds? the (?:available )?context|maximum context length|context window")
+            .unwrap()
+    });
+    static TOKENS_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)request \((\d+) tokens\)|n_prompt_tokens'?\s*[:=]\s*(\d+)|requested (\d+) tokens",
+        )
+        .unwrap()
+    });
+    let error = error?;
+    if !OVERFLOW_RE.is_match(error) {
+        return None;
+    }
+    let tokens = TOKENS_RE
+        .captures(error)
+        .and_then(|c| (1..=3).find_map(|i| c.get(i)))
+        .and_then(|m| m.as_str().parse::<u64>().ok());
+    Some(tokens)
+}
+
 fn message_hash(m: &Message) -> String {
     let tool_calls: Vec<String> = m
         .tool_calls
@@ -521,4 +560,21 @@ fn message_hash(m: &Message) -> String {
         m.tool_call_id.as_deref().unwrap_or(""),
         tool_calls.join("\u{2}")
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::context_overflow_tokens;
+
+    #[test]
+    fn overflow_errors_are_recognized() {
+        let e = "litellm.ContextWindowExceededError: litellm.BadRequestError: ContextWindowExceededError: OpenAIException - request (16456 tokens) exceeds the available context size (16384 tokens), try increasing it";
+        assert_eq!(context_overflow_tokens(Some(e)), Some(Some(16_456)));
+        assert_eq!(
+            context_overflow_tokens(Some("This model's maximum context length is 8192 tokens")),
+            Some(None)
+        );
+        assert_eq!(context_overflow_tokens(Some("connection refused")), None);
+        assert_eq!(context_overflow_tokens(None), None);
+    }
 }

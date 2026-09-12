@@ -71,16 +71,23 @@ filler inside the chat: turn on **Code Interpreter** in the chat input's
 integrations menu, then send:
 
 ```text
-Run this Python with the code interpreter exactly as written. After it runs, reply with only the word OK. Do not repeat, summarize, or describe the output.
+Use the code interpreter to execute the Python below and wait for its result. Only after the result is available, reply with the single word OK and nothing else.
 print("The quick brown fox jumps over the lazy dog near the river bank at dawn. " * 550)
 ```
 
 Open WebUI runs the code in the browser, appends the output to the reply, and
 calls the model again with the output in the context. That second call is
 the one that carries ~9,500 prompt tokens; the filter waits for it and shows
-its score, so the status line reads the same as with pasting. The "only the
-word OK" part matters: asked to show the output, the model regenerates all
-9,500 tokens as its reply, which takes minutes. A terminal tool
+its score, so the status line reads the same as with pasting. Two things to
+know: asked to *show* the output, the model regenerates all 9,500 tokens as
+its reply, which takes minutes; and told too bluntly to just say OK, it skips
+running the code. The wording above asks for both in order.
+
+Sizing, in a fresh chat on this model: 550 repetitions land near 79 %
+(yellow), 650 near 88 % (orange), 750 past 90 % (red). Around 850 the
+follow-up request exceeds llama.cpp's real 16,384-token window and the model
+call fails; Context Guard scores that as `🔴 context overflow` with the
+request size, since a rejected request is the strongest context signal there is. A terminal tool
 server works the same way, with its output arriving as a `tool` message.
 
 ## 8+. Tool signals (optional, needs a tool server)

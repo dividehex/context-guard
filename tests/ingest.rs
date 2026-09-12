@@ -189,3 +189,30 @@ async fn window_lets_a_conversation_recover() {
 async fn harness_with_window(turns: u32) -> common::Harness {
     common::harness_with(|c| c.scoring.window_turns = turns).await
 }
+
+#[tokio::test]
+async fn context_window_overflow_scores_red() {
+    let h = harness().await;
+    let ok = PayloadBuilder::new("o-1", "chat-o", "m1")
+        .messages(json!([user("hi")]))
+        .response("hello there friend")
+        .times(1.0, 2.0)
+        .build();
+    h.ingest(vec![ok]).await;
+    h.wait_for_message("chat-o", "m1").await;
+    let failed = PayloadBuilder::new("o-2", "chat-o", "m2")
+        .messages(json!([user("hi"), assistant("hello there friend"), user("huge")]))
+        .set("status", json!("failure"))
+        .set("error_str", json!("litellm.ContextWindowExceededError: OpenAIException - request (16456 tokens) exceeds the available context size (16384 tokens), try increasing it"))
+        .times(3.0, 4.0)
+        .build();
+    h.ingest(vec![failed]).await;
+    let r = h.wait_for_message("chat-o", "m2").await;
+    assert_eq!(r["score"], json!(80), "{r}");
+    assert_eq!(r["turn"], json!(2));
+    assert_eq!(r["context"]["prompt_tokens"], json!(16456));
+    assert_eq!(
+        r["summary"],
+        json!("🟢 Context Guard 80 · good · 🔴 context overflow (16,456/10,000)")
+    );
+}

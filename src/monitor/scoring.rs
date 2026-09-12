@@ -197,14 +197,22 @@ pub fn score(
 ) -> Score {
     let mut reasons = Vec::new();
     if let Some(signal) = context.signal {
-        let percent = context.percent.unwrap_or(0.0);
+        let detail = if context.overflow {
+            match context.prompt_tokens {
+                Some(n) => format!("request of {n} tokens exceeded the model's context window"),
+                None => "request exceeded the model's context window".to_string(),
+            }
+        } else {
+            format!(
+                "context utilization {:.1}% of {} tokens",
+                context.percent.unwrap_or(0.0),
+                context.limit.unwrap_or(0)
+            )
+        };
         reasons.push(Reason {
             signal: signal.as_str().to_string(),
             penalty: penalties.for_signal(signal),
-            detail: format!(
-                "context utilization {percent:.1}% of {} tokens",
-                context.limit.unwrap_or(0)
-            ),
+            detail,
         });
     }
     for a in anomalies {
@@ -282,6 +290,17 @@ fn health_light(status: Status) -> &'static str {
 /// Context light follows the penalty bands: green below 70 %, yellow 70–80 %,
 /// orange 80–90 %, red above 90 %; white when the limit is unknown.
 fn context_phrase(context: &ContextAssessment) -> String {
+    if context.overflow {
+        return match (context.prompt_tokens, context.limit) {
+            (Some(used), Some(limit)) => format!(
+                "🔴 context overflow ({}/{})",
+                with_commas(used),
+                with_commas(limit)
+            ),
+            (Some(used), None) => format!("🔴 context overflow ({} tokens)", with_commas(used)),
+            _ => "🔴 context overflow".to_string(),
+        };
+    }
     match (context.percent, context.prompt_tokens, context.limit) {
         (Some(pct), Some(used), Some(limit)) => {
             let light = match context.signal {
@@ -353,6 +372,21 @@ mod tests {
     }
 
     #[test]
+    fn overflow_scores_as_red_context() {
+        let ctx = crate::monitor::context::overflow(Some(16_456), Some(12_288));
+        let s = score(&ctx, &[], &Penalties::default(), &Thresholds::default());
+        assert_eq!(s.risk, 20);
+        assert_eq!(
+            s.reasons[0].detail,
+            "request of 16456 tokens exceeded the model's context window"
+        );
+        assert_eq!(
+            summary(&s, &ctx, &[]),
+            "🟢 Context Guard 80 · good · 🔴 context overflow (16,456/12,288)"
+        );
+    }
+
+    #[test]
     fn health_is_clamped_to_zero() {
         let p = Penalties::default();
         let t = Thresholds::default();
@@ -363,11 +397,8 @@ mod tests {
         assert_eq!(s.health, 0);
         assert_eq!(s.risk, 100);
         assert_eq!(s.status, Status::ResetRecommended);
-        assert!(
-            summary(&s, &assess(Some(9500), Some(10_000)), &anomalies).starts_with(
-                "🔴 Context Guard 0 · reset recommended · 🔴 context 95% (9,500/10,000)"
-            )
-        );
+        assert!(summary(&s, &assess(Some(9500), Some(10_000)), &anomalies)
+            .starts_with("🔴 Context Guard 0 · reset recommended · 🔴 context 95% (9,500/10,000)"));
     }
 
     #[test]
