@@ -1,10 +1,17 @@
 # Context Guard
 
 A deterministic, out-of-band health monitor for LLM conversations. Context
-Guard watches the completions that flow through LiteLLM, keeps a per-chat
-record of what was said, and after every reply computes a health score from
-0 to 100 with an explicit list of reasons. Open WebUI shows that score under
-the reply as a UI-only status line.
+Guard watches the completions that flow through [LiteLLM](https://github.com/BerriAI/litellm),
+keeps a per-chat record of what was said, and after every reply computes a
+health score from 0 to 100 with an explicit list of reasons.
+[Open WebUI](https://github.com/open-webui/open-webui) shows the score under
+each reply as a UI-only status line:
+
+```text
+🟢 Context Guard 100 · healthy · 🟢 context 4% (508/12,288)
+🟡 Context Guard 74 · watch · 🟡 context 78% (25,624/32,768) · 1 drift · 1 repeated call
+🟢 Context Guard 90 · healthy · 🔴 context overflow (16,456/12,288)
+```
 
 > Context Guard does not determine the truth of arbitrary natural-language
 > statements. It detects deterministic indicators of conversation degradation,
@@ -14,11 +21,80 @@ the reply as a UI-only status line.
 > Context Guard does not add any messages, prompts, canaries, or health
 > information to the model's context.
 
+It is never in the inference path. If it crashes, hangs, loses its database, or
+is removed, LiteLLM logs one line per flush and inference continues unchanged.
+
+Verified against LiteLLM v1.94.1 and Open WebUI v0.11.3 with llama.cpp
+backends. One Rust binary, one container, SQLite, no other services.
+
+## Quick install
+
+You need a compose stack with LiteLLM and Open WebUI on a shared Docker
+network, and Open WebUI already sending its user-info headers
+(`ENABLE_FORWARD_USER_INFO_HEADERS=true`, which is how it forwards the chat id).
+
+**1. Add the container.** Clone this repository next to your compose file and
+merge `docker-compose.example.yml` into it: one `context-guard` service on the
+same network as LiteLLM, with a `/data` volume.
+
+```sh
+git clone https://github.com/<you>/context-guard
+mkdir -p data/context-guard
+docker compose up -d --build context-guard
+curl -s http://127.0.0.1:7432/healthz        # {"status":"ok","database":"ok",...}
+```
+
+**2. Point LiteLLM at it.** Two environment variables on the `litellm`
+service and one block in the LiteLLM config file, then recreate LiteLLM.
+
+```yaml
+# compose: litellm service
+    environment:
+      GENERIC_LOGGER_ENDPOINT: http://context-guard:7432/api/v1/ingest/litellm
+      DEFAULT_FLUSH_INTERVAL_SECONDS: "1"
+```
+
+```yaml
+# litellm config.yaml
+litellm_settings:
+  callbacks: ["generic_api"]
+  extra_spend_tag_headers:
+    - x-openwebui-chat-id
+    - x-openwebui-user-id
+    - x-openwebui-message-id
+    - x-openwebui-task
+```
+
+```sh
+docker compose up -d litellm
+```
+
+**3. Two headers on the Open WebUI connection.** Admin Panel → Settings →
+Connections → your LiteLLM connection → *Headers*, paste:
+
+```json
+{"X-OpenWebUI-Message-Id": "{{MESSAGE_ID}}", "X-OpenWebUI-Task": "{{TASK}}"}
+```
+
+Keep the double braces; Open WebUI fills them per request. The first lets the
+status line match its own reply exactly; the second marks background calls
+(title, tags, follow-ups) so they are not scored as turns.
+
+**4. Install the filter.** Admin Panel → Functions → *+* → paste
+`openwebui/context_guard_filter.py` → Save → enable it → toggle **Global**.
+(Or `openwebui/install-filter.sh` with an admin API key.)
+
+**5. Send a message.** The status line appears under the reply within a
+second or two. `http://127.0.0.1:7432/api/v1/conversations` lists chats and
+scores; `docs/ui-demo.md` walks a chat through every signal so you can watch
+the score fall.
+
 ## What it does, and does not, claim
 
 It **does**:
 
-* measure how full the model's context window is
+* measure how full the model's context window is, and flag a request the
+  backend rejected for exceeding it
 * notice when the assistant repeats the same tool call or the same reply
 * notice when the assistant states a different value (port, IP, path, version,
   setting, …) for something the user established unambiguously
@@ -48,11 +124,6 @@ Open WebUI ──► LiteLLM ──► llama.cpp / other backends
    └─────────────┘  then a `status` event under the reply (never in messages[])
 ```
 
-Context Guard is never between Open WebUI and LiteLLM. If it crashes, hangs,
-loses its database or is removed, LiteLLM logs a line per flush and inference
-continues unchanged. The Open WebUI filter gives up silently after one refused
-connection.
-
 ### Zero-context-overhead design
 
 The model receives exactly the request it would receive without Context Guard:
@@ -66,158 +137,146 @@ The model receives exactly the request it would receive without Context Guard:
   message id, role, content, info, timestamp and sources, so the score never
   reaches the model.
 
-## Build
+### Failure isolation
 
-```sh
-cargo build --release          # needs a Rust toolchain (rustup)
-cargo test                     # unit + integration tests (temp SQLite)
-cargo clippy --all-targets -- -D warnings
-```
+* No inference proxying, ever, and nothing `depends_on` Context Guard.
+* LiteLLM's `generic_api` logger makes zero retries, swallows every error and
+  clears its queue; an unreachable Context Guard costs one log line per flush.
+* Ingest validates JSON, enqueues, and returns; a single worker processes
+  batches in `startTime` order. A full queue drops and counts.
+* Malformed payloads are rejected with a counter; a batch with one bad item
+  still processes the good ones; oversized or deeply nested bodies are refused
+  before parsing does any work.
+* Database write failures are logged and counted; the event is dropped and the
+  worker continues. If the database cannot be opened at startup the process
+  exits non-zero so the container restarts.
+* Events are deduplicated by LiteLLM's payload id, so redelivery is harmless.
+* The filter only reads, returns the body untouched, and gives up silently
+  after one refused connection (about one second).
 
-Without a host toolchain:
+## LiteLLM integration in detail
 
-```sh
-docker build -t ai-context-guard .
-```
+LiteLLM's built-in `generic_api` logger is a batch logger: every completion's
+`StandardLoggingPayload` is queued after the response is sent and flushed as a
+JSON array every `DEFAULT_FLUSH_INTERVAL_SECONDS` (default 5; set to 1 so the
+score is ready when Open WebUI asks) or at 512 events.
 
-The image is a multi-stage build: `rust:1-bookworm` compiles, the runtime is
-`debian:bookworm-slim` with the binary and `ca-certificates`, running as uid
-10001. `HEALTHCHECK` calls `context-guard healthcheck`, a subcommand that GETs
-`/healthz`, so the image needs no curl.
-
-## Docker
-
-`docker-compose.example.yml` is the service block to paste into your stack.
-The important parts:
-
-```yaml
-  context-guard:
-    build:
-      context: /path/to/context-guard
-    image: ai-context-guard
-    container_name: ai-context-guard
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:7432:7432"     # debugging only; the other containers use the name
-    volumes:
-      - ./data/context-guard:/data
-    environment:
-      RUST_LOG: info
-      CONTEXT_GUARD_DATABASE: /data/context-guard.db
-      CONTEXT_GUARD_RETENTION_DAYS: "30"
-    networks:
-      - ai-backend                # the network LiteLLM and Open WebUI are on
-```
-
-If the bind-mounted `/data` directory is owned by your host user rather than
-uid 10001, add `user: "1000:1000"` (your uid:gid). Nothing `depends_on` this
-service.
-
-**The SQLite database contains copies of conversation text** (user, tool and
-assistant messages, one turn's delta per event). Treat `./data/context-guard`
-like the Open WebUI database: keep it on a protected disk, do not share it, and
-keep the API port bound to localhost or the internal network.
-
-## LiteLLM configuration
-
-Verified against LiteLLM v1.94.1. Two config-only changes; no Python, no
-image change.
-
-**Environment of the `litellm` container:**
-
-```yaml
-    environment:
-      GENERIC_LOGGER_ENDPOINT: http://context-guard:7432/api/v1/ingest/litellm
-      DEFAULT_FLUSH_INTERVAL_SECONDS: "1"   # default 5; lower so the score is ready when Open WebUI asks
-```
-
-**`litellm_settings` in the proxy config:**
-
-```yaml
-litellm_settings:
-  callbacks: ["generic_api"]
-  extra_spend_tag_headers:
-    - x-openwebui-chat-id
-    - x-openwebui-user-id
-    - x-openwebui-message-id
-    - x-openwebui-task
-```
-
-Then `docker compose up -d litellm`.
-
-How it works: LiteLLM's built-in `generic_api` logger is a batch logger. Every
-completion's `StandardLoggingPayload` is queued after the response is sent and
-flushed as a JSON array every `DEFAULT_FLUSH_INTERVAL_SECONDS` (or at 512
-events). It makes zero retries, swallows every error, and clears its queue, so
-an unreachable Context Guard costs LiteLLM one log line per flush.
 `extra_spend_tag_headers` turns the listed request headers into
 `request_tags` entries such as `"x-openwebui-chat-id: <uuid>"`; that is how
 Context Guard learns which chat, user and message a completion belongs to.
-(The payload's `requester_custom_headers` field is always null in this
-LiteLLM version, so tags are the only config-level path.)
+Header names are lowercase because LiteLLM stores them that way. (The
+payload's `requester_custom_headers` field is always null in v1.94.1, so tags
+are the only config-level path.)
 
 Context limits come from `model_info.max_input_tokens` in the LiteLLM model
 list, which the payload carries. Set `CONTEXT_GUARD_MODEL_LIMITS` only for
-models without it.
+models without it. Note that this is the *input* budget LiteLLM declares, not
+the backend's raw window; a request that exceeds the raw window fails and is
+scored as an overflow.
 
-## Open WebUI configuration
+Conversation identity, in order of precedence:
 
-Open WebUI (0.11.x) already sends `X-OpenWebUI-Chat-Id` and
-`X-OpenWebUI-User-Id` to LiteLLM when `ENABLE_FORWARD_USER_INFO_HEADERS=true`.
-Two small additions are made in the admin UI (they live in Open WebUI's
-config database, not in env files):
+1. `x-openwebui-chat-id` request tag (from the header Open WebUI sends).
+2. LiteLLM `trace_id`, only with `CONTEXT_GUARD_TRUST_TRACE_ID=true` (a
+   client can set it via an `x-*-session-id` header; without one it is a
+   per-request uuid, which is why it is off by default).
+3. Fallback: `fallback:` + a hash of user id, model and the first user
+   message. Fragile by design; a warning is logged.
 
-1. **Connection headers.** Admin Panel → Settings → Connections → your
-   LiteLLM connection → *Headers*:
+Open WebUI's context compaction rewrites `messages[]` mid-chat, so Context
+Guard never derives turn numbers or facts from the current message list: turns
+are counted from events and known values persist per conversation.
 
-   | Header | Value |
-   |--------|-------|
-   | `X-OpenWebUI-Message-Id` | `{{MESSAGE_ID}}` |
-   | `X-OpenWebUI-Task` | `{{TASK}}` |
+## Open WebUI integration in detail
 
-   The first lets the filter fetch exactly its own reply's score. The second
-   marks Open WebUI's background calls (title, tags, follow-ups, query
-   generation) so they are recorded but never scored as turns. Without it,
-   Context Guard falls back to a heuristic: non-streaming single-message
-   requests are treated as tasks.
+Open WebUI sends `X-OpenWebUI-Chat-Id` and `X-OpenWebUI-User-Id` to LiteLLM on
+its own when `ENABLE_FORWARD_USER_INFO_HEADERS=true`. The two headers from the
+quick install are connection-level custom headers with Open WebUI's template
+variables (`{{MESSAGE_ID}}`, `{{TASK}}`). Without the task header, Context
+Guard falls back to a heuristic: non-streaming single-message requests are
+treated as background tasks.
 
-2. **The filter.** Admin Panel → Functions → *+* → paste
-   `openwebui/context_guard_filter.py` → Save → enable it → toggle **Global**
-   so it applies to every model. Valves:
+The filter (`openwebui/context_guard_filter.py`) has only an `outlet`. Its
+valves:
 
-   | Valve | Default | Meaning |
-   |-------|---------|---------|
-   | `context_guard_url` | `http://context-guard:7432` | reachable from the Open WebUI container |
-   | `wait_seconds` | 6 | how long to wait for the score |
-   | `poll_interval` | 0.5 | seconds between polls |
-   | `connect_timeout` | 1 | per-request timeout |
-   | `show_minimum` | always | show for every reply, or only from `good`/`watch`/`degraded`/`reset_recommended` down |
-   | `notify_below` | 40 | toast when health falls below this; 0 disables |
+| Valve | Default | Meaning |
+|-------|---------|---------|
+| `context_guard_url` | `http://context-guard:7432` | reachable from the Open WebUI container |
+| `wait_seconds` | 6 | how long to wait for the score |
+| `poll_interval` | 0.5 | seconds between polls |
+| `connect_timeout` | 1 | per-request timeout |
+| `settle_seconds` | 1.5 | re-check once after a result so a reply with tool or code-interpreter iterations shows its last iteration |
+| `show_minimum` | always | show for every reply, or only from `good`/`watch`/`degraded`/`reset_recommended` down |
+| `notify_below` | 40 | toast when health falls below this; 0 disables |
 
-   `openwebui/install-filter.sh` does the same through the API with an admin
-   key, for redeploys.
-
-The status line looks like:
-
-```text
-🟡 Context Guard 74 · watch · 🟡 context 78% (25,624/32,768) · 1 drift · 1 repeated call
-```
-
-The first light is the health status (🟢 healthy/good, 🟡 watch, 🟠 degraded,
-🔴 reset recommended); the second is context pressure on the same scale
-(🟢 below 70 %, 🟡 70–80 %, 🟠 80–90 %, 🔴 above 90 %, ⚪ unknown limit),
-followed by the prompt tokens of this request against the model's limit.
 Open WebUI shows the status on a single line with an ellipsis, so anomalies
 use short labels (`drift`, `suspicious id`, `loop`, `repeated call`, `orphan
 result`, `unknown call id`) and fold into `+N more` past about 96 characters.
 The full reasons are always in the API response.
+
+## How scoring works
+
+Each chat completion is one **turn**. For every turn:
+
+1. **Context utilization** = `prompt_tokens / context_limit`, using the token
+   count the backend reported (exact) against LiteLLM's declared input limit.
+   `< 70 %` nothing · `70–80 %` −5 · `80–90 %` −10 · `> 90 %` −20.
+   Unknown limit ⇒ reported as unknown, no penalty. A request the backend
+   rejected for exceeding its window is scored as an overflow: red light, the
+   reported request size, −20.
+2. **Signals** run over the new messages and the response and record
+   **anomalies**, each deduplicated per conversation:
+
+   | Signal | Penalty | Fires when |
+   |--------|---------|------------|
+   | `repeated_tool_call` | 5 | the same tool with the same canonicalized arguments (key order and whitespace ignored) appears 3 times in the last 5 calls |
+   | `response_loop` | 5 | the reply (≥ 20 words) has Jaccard similarity ≥ 0.90 of word 3-shingles with at least 2 of the previous 3 replies |
+   | `known_value_drift` | 15 | see below |
+   | `tool_result_without_call` | 20 | a `tool` message's `tool_call_id` was not issued by an earlier assistant message in the same request (counted once per id) |
+   | `tool_call_id_reference_unknown` | 25 | the reply cites something shaped like the conversation's real tool-call ids (same `call_` prefix, or for opaque ids such as llama.cpp's, the same length with letters and digits) that was never issued |
+   | `suspicious_identifier` | 5 | the reply introduces a name that is not known but is within 20 % edit distance of, or extends by prefix (≥ 6 shared chars), a known model, container, host, tool or name; paths and env vars use edit distance only |
+
+3. **Risk** = context penalty + the penalties of every anomaly recorded in the
+   last `window_turns` (default 10) turns. **Health** = `100 − risk`, clamped
+   to 0..100. The window lets a conversation recover after the behaviour stops.
+4. **Status**: `≥ 90` healthy · `≥ 75` good · `≥ 60` watch · `≥ 40` degraded ·
+   below that reset recommended. The lights follow the same scale, for health
+   and for context pressure.
+
+Every result stores the reasons, so `Σ penalties == risk` always holds and
+nothing is a magic number. Weights, thresholds and the window live in
+configuration (`config/context-guard.example.toml`), not in code.
+
+### Known-value drift, precisely
+
+User and tool messages are **sources of truth**; assistant messages are
+**claims**; system prompts are ignored. From user and tool text, Context Guard
+extracts typed values: IPv4/IPv6 addresses, ports (only with an explicit
+marker such as `port 8080`, `host:8080`, `--port 8080`), URLs, absolute
+paths, `ENV_VAR=value`, versions (`v1.2.3`, `version 1.2`, `litellm 1.94.1`),
+hostnames with a real TLD, container names (configurable prefix, default
+`ai-`), and `snake_case_key: 123` settings. Each value gets an **anchor**: the
+nearest identifier-like token before it (`llama.cpp` in "llama.cpp is running
+on port 8080"), or none.
+
+A claim is drift only when **all** of these hold:
+
+1. the registry has **exactly one** value for the same kind and anchor,
+2. the claimed value differs from it,
+3. the claimed value never appeared in any user or tool message of the chat,
+4. the value was recognized with its kind marker (no bare numbers).
+
+So "the API is on port 4000" followed by an assistant "the API on port 4100"
+is drift; "open port 3000 for the UI" is not, because no anchored value
+conflicts; and if the user themself mentioned 4100 earlier, nothing fires.
+False positives are treated as worse than misses.
 
 ## REST API
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/api/v1/ingest/litellm` | LiteLLM telemetry (JSON array, object, or NDJSON). Always answers `202` with `{accepted, dropped}` once parsed; `400` for unparseable bodies, `413` above `CONTEXT_GUARD_MAX_BODY_BYTES`. Never waits for the database. |
-| `GET` | `/healthz` | `{status, database, queue_depth, uptime_s, version}`; `200` even when the database is unavailable (monitoring degrades, the process lives). |
+| `GET` | `/healthz` | `{status, database, queue_depth, uptime_s, version}`; `200` even when the database is unavailable. |
 | `GET` | `/api/v1/conversations?limit=50&status=watch` | Recent conversations with their latest score. |
 | `GET` | `/api/v1/conversations/{id}/health` | Latest result. `?message_id=X` returns the result for that Open WebUI message (`404 not_scored_yet` until it exists); `?after=<unix seconds>` the latest result at or after that time. |
 | `GET` | `/api/v1/conversations/{id}/history?limit=200` | All health results in turn order plus every anomaly. |
@@ -271,58 +330,6 @@ For a Prometheus on another host, either publish the port on all interfaces
 `CONTEXT_GUARD_METRICS_LISTEN=0.0.0.0:7433` and publish only 7433: that
 listener serves `/metrics` and `/healthz` and nothing else.
 
-## How scoring works
-
-Each chat completion is one **turn**. For every turn:
-
-1. **Context utilization** = `prompt_tokens / context_limit`.
-   `< 70 %` nothing · `70–80 %` −5 · `80–90 %` −10 · `> 90 %` −20.
-   Unknown limit ⇒ reported as unknown, no penalty.
-2. **Signals** run over the new messages and the response and record
-   **anomalies** (each deduplicated per conversation):
-
-   | Signal | Penalty | Fires when |
-   |--------|---------|------------|
-   | `repeated_tool_call` | 5 | the same tool with the same canonicalized arguments (key order and whitespace ignored) appears 3 times in the last 5 calls |
-   | `response_loop` | 5 | the reply (≥ 20 words) has Jaccard similarity ≥ 0.90 of word 3-shingles with at least 2 of the previous 3 replies |
-   | `known_value_drift` | 15 | see below |
-   | `tool_result_without_call` | 20 | a `tool` message's `tool_call_id` was not issued by an earlier assistant message in the same request |
-   | `tool_call_id_reference_unknown` | 25 | the reply cites something shaped like the conversation's real tool-call ids (same `call_` prefix, or for opaque ids such as llama.cpp's, the same length with letters and digits) that was never issued |
-   | `suspicious_identifier` | 5 | the reply introduces a name that is not known but is within 20 % edit distance of, or extends by prefix (≥ 6 shared chars), a known model, container, host, tool or name; paths and env vars use edit distance only |
-
-3. **Risk** = context penalty + the penalties of every anomaly recorded in the
-   last `window_turns` (default 10) turns. **Health** = `100 − risk`, clamped
-   to 0..100. The window lets a conversation recover after the behaviour stops.
-4. **Status**: `≥ 90` healthy · `≥ 75` good · `≥ 60` watch · `≥ 40` degraded ·
-   below that reset recommended.
-
-Every result stores the reasons, so `Σ penalties == risk` always holds and
-nothing is a magic number. Weights, thresholds and the window live in
-configuration (`config/context-guard.example.toml`), not in code.
-
-### Known-value drift, precisely
-
-User and tool messages are **sources of truth**; assistant messages are
-**claims**. From both, Context Guard extracts typed values: IPv4/IPv6
-addresses, ports (only with an explicit marker such as `port 8080`,
-`host:8080`, `--port 8080`), URLs, absolute paths, `ENV_VAR=value`, versions
-(`v1.2.3`, `version 1.2`, `litellm 1.94.1`), hostnames with a real TLD,
-container names (configurable prefix, default `ai-`), and `snake_case_key: 123`
-settings. Each value gets an **anchor**: the nearest identifier-like token
-before it (`llama.cpp` in "llama.cpp is running on port 8080"), or none.
-
-A claim is drift only when **all** of these hold:
-
-1. the registry has **exactly one** value for the same kind and anchor,
-2. the claimed value differs from it,
-3. the claimed value never appeared in any user or tool message of the chat,
-4. the value was recognized with its kind marker (no bare numbers).
-
-So "the API is on port 4000" followed by an assistant "the API on port 4100"
-is drift; "open port 3000 for the UI" is not, because no anchored value
-conflicts; and if the user themself mentioned 4100 earlier, nothing fires.
-False positives are treated as worse than misses.
-
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -343,70 +350,59 @@ False positives are treated as worse than misses.
 | `CONTEXT_GUARD_CONTAINER_PREFIXES` | `ai-` | tokens with these prefixes are container names |
 | `RUST_LOG` | `info` | log filter |
 
-Default logging never includes message or response text: ids, counts, hashes
-and anomaly details only. Anomaly details do quote the specific conflicting
-values (e.g. `8080` vs `8000`).
+Precedence: environment > TOML file > compiled defaults.
 
-## Conversation identity
+## Security and data
 
-1. `x-openwebui-chat-id` request tag (from the header Open WebUI sends).
-2. LiteLLM `trace_id`, only with `CONTEXT_GUARD_TRUST_TRACE_ID=true` (a
-   client can set it via an `x-*-session-id` header; without one it is a
-   per-request uuid, which is why it is off by default).
-3. Fallback: `fallback:` + a hash of user id, model and the first user
-   message. Documented as fragile; a warning is logged.
+**The SQLite database contains copies of conversation text** (user, tool and
+assistant messages, one turn's delta per event). Treat `/data` like the Open
+WebUI database: keep it on a protected disk, do not share it, and keep the API
+port bound to localhost or the internal network. Prometheus output never
+includes conversation ids or text. Default logging never includes message or
+response text: ids, counts, hashes and anomaly details only, with values that
+look like keys, tokens or passwords redacted. Anomaly details do quote the
+specific conflicting values (e.g. `8080` vs `8000`).
 
-Open WebUI's context compaction rewrites `messages[]` mid-chat, so Context
-Guard never derives turn numbers or facts from the current message list: turns
-are counted from events and known values persist per conversation.
+## Build and test
 
-## Reliability
+```sh
+cargo build --release
+cargo test                                   # 51 unit + integration tests, temp SQLite
+cargo clippy --all-targets -- -D warnings
+docker build -t context-guard .              # multi-stage; runtime is debian-slim, uid 10001
+```
 
-* No inference proxying, ever.
-* Ingest validates JSON, enqueues, and returns; the single worker processes
-  batches in `startTime` order. A full queue drops and counts.
-* Malformed payloads are rejected with a counter; a batch with one bad item
-  still processes the good ones; deeply nested or oversized bodies are refused
-  before parsing does any work.
-* Database write failures are logged and counted; the event is dropped and the
-  worker continues. If the database cannot be opened at startup the process
-  exits non-zero so the container restarts (inference is unaffected either way).
-* Events are deduplicated by LiteLLM's payload id, so redelivery is harmless.
+Filter tests need Python with `aiohttp`, `pydantic` and `pytest`:
+
+```sh
+python -m pytest openwebui/
+```
+
+End-to-end against a live stack (`scripts/e2e_degradation.py`): drives one
+scripted chat through LiteLLM and a real model and asserts every signal and
+score from 100 down to "reset recommended", plus an optional context-pressure
+stage on a small-context model.
+
+```sh
+scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model> [--context-model <small-model>]
+```
+
+`docs/ui-demo.md` is the interactive version: messages to type into an Open
+WebUI chat, each with the status line it produces.
 
 ## Current limitations
 
 * Only what LiteLLM logs is visible. Tools executed by Open WebUI appear as
   `tool_calls` in the reply and `tool` messages in the next request; tools that
-  never pass through the model are invisible.
+  never pass through the model are invisible. Tool signals need the model's
+  Function Calling set to Native in Open WebUI.
 * Known-value drift is deliberately narrow: typed values with markers and an
   unambiguous anchor. Prose contradictions are out of scope.
 * Response looping uses exact-ish text similarity; paraphrased loops are missed.
-* Per-turn scores are stored, but the health of a chat that started before
-  Context Guard was deployed only reflects turns seen since then.
+* The health of a chat that started before Context Guard was deployed only
+  reflects turns seen since then.
 * No authentication; rely on network placement.
 * One process, one SQLite file; sized for a personal or small-team stack.
-
-## End-to-end degradation test
-
-To prove it interactively, `docs/ui-demo.md` is a walkthrough of messages to
-type into an Open WebUI chat, each with the status line it produces.
-
-`scripts/e2e_degradation.py` drives one scripted chat through the live
-LiteLLM (with Open WebUI's headers) and a real model, and checks after every
-turn that Context Guard recorded the expected signal and score, walking the
-chat from 100 down to "reset recommended":
-
-```sh
-scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model qwen3-30b-a3b
-# optional: pad a small model's prompt to ~75 % of its limit
-scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --context-model qwen3-vl-4b
-```
-
-Scripted assistant wording uses an echo system prompt with a minimal request
-history, so the model repeats it verbatim; Context Guard still judges it
-against the facts the user stated in earlier turns because it keeps its
-registry per conversation, not per request. Tool-call stages use the model
-for real. The script needs only Python 3 and prints PASS/FAIL per stage.
 
 ## Repository layout
 
@@ -418,5 +414,11 @@ src/api         axum handlers
 src/metrics.rs  Prometheus registry
 src/worker.rs   queue consumer
 openwebui/      the Open WebUI filter, its tests, install script
+scripts/        end-to-end degradation test
+docs/           UI walkthrough and the original design plan
 tests/          integration and fault-tolerance tests; real captured fixtures
 ```
+
+## License
+
+MIT, see `LICENSE`.

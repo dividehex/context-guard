@@ -460,10 +460,10 @@ mod tests {
 
     #[test]
     fn extracts_urls_hosts_ips_and_paths() {
-        let v = ex("Use http://llama-swap:8080/v1 or 192.168.224.115:9292 and see /etc/llama-swap/config.yaml; docs at docs.example.com.");
+        let v = ex("Use http://llama-swap:8080/v1 or 192.0.2.10:9292 and see /etc/llama-swap/config.yaml; docs at docs.example.com.");
         assert!(has(&v, ValueKind::Url, "", "http://llama-swap:8080/v1"));
         assert!(has(&v, ValueKind::Port, "llama-swap", "8080"));
-        assert!(has(&v, ValueKind::Ipv4, "", "192.168.224.115"));
+        assert!(has(&v, ValueKind::Ipv4, "", "192.0.2.10"));
         assert!(has(&v, ValueKind::Path, "", "/etc/llama-swap/config.yaml"));
         assert!(has(&v, ValueKind::Hostname, "", "docs.example.com"));
         assert!(!has(&v, ValueKind::Hostname, "", "config.yaml"));

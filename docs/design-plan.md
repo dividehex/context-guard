@@ -192,7 +192,7 @@ Invariants enforced by construction:
 ## 3. Project layout
 
 ```text
-~/dev/context-guard/
+context-guard/
 ├── Cargo.toml
 ├── Cargo.lock
 ├── Dockerfile                      multi-stage, non-root runtime
@@ -634,7 +634,7 @@ import through the UI is the documented primary path.
 ```yaml
   context-guard:
     build:
-      context: /home/jwatkins/dev/context-guard      # source stays in ~/dev, like tailor
+      context: ./context-guard
     image: ai-context-guard
     container_name: ai-context-guard
     restart: unless-stopped
