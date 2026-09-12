@@ -467,7 +467,11 @@ mod tests {
             let ctx = assess(Some(next() % 12_000), Some(10_000));
             let s = score(&ctx, &anomalies, &p, &t);
             let raw: u32 = s.reasons.iter().map(|r| r.penalty).sum();
-            assert_eq!(raw.min(100), s.risk, "risk is the reasons' sum, capped at 100");
+            assert_eq!(
+                raw.min(100),
+                s.risk,
+                "risk is the reasons' sum, capped at 100"
+            );
             assert_eq!(s.health + s.risk, 100);
             assert!(s.risk <= 100);
             assert_eq!(s.status, Status::for_health(s.health, &t));
