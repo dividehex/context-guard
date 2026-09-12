@@ -80,7 +80,7 @@ struct RawPayload {
     messages: Value,
     response: Value,
     model_map_information: Value,
-    request_tags: Vec<Value>,
+    request_tags: Value,
     end_user: Option<String>,
     metadata: Value,
 }
@@ -437,7 +437,7 @@ mod tests {
             NormalizeError::UnsupportedCallType(_)
         ));
 
-        let sparse = json!({"id": "1", "call_type": "completion", "model": "m", "messages": "not-a-list", "response": 5, "prompt_tokens": "12"});
+        let sparse = json!({"id": "1", "call_type": "completion", "model": "m", "messages": "not-a-list", "response": 5, "prompt_tokens": "12", "request_tags": null});
         let ev = normalize(&sparse, &cfg()).unwrap();
         assert!(ev.messages.is_empty());
         assert!(ev.response_text.is_none());

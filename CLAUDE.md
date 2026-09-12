@@ -103,6 +103,7 @@ GET /api/v1/conversations/...  (src/api/conversations.rs) read the stored result
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets            # unit + integration; tests/binary.rs spawns the real binary
+cargo audit                         # RustSec advisories for Cargo.lock; ignores live in .cargo/audit.toml with a reason each
 python -m pytest -q openwebui/      # needs aiohttp, pydantic, pytest
 docker build -t context-guard .     # multi-stage, runs as uid 10001, `context-guard healthcheck` subcommand
 scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model>   # live stack only
@@ -112,7 +113,7 @@ On this machine cargo is installed under `~/.cargo/bin`, which non-interactive
 shells do not have on PATH; prefix commands with
 `export PATH="$HOME/.cargo/bin:$PATH"` if `cargo` is not found.
 
-CI (`.github/workflows/ci.yml`) runs exactly the first four plus a Docker
+CI (`.github/workflows/ci.yml`) runs exactly the first five plus a Docker
 build-and-smoke. All of it must be green before a change is done; rustfmt and
 clippy with `-D warnings` are hard gates.
 

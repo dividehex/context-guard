@@ -1,7 +1,6 @@
 //! SQLite persistence: connection, migrations, retention.
 
 use std::path::Path;
-use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -17,8 +16,9 @@ pub struct Database {
 
 impl Database {
     pub async fn connect(path: &Path) -> anyhow::Result<Database> {
-        let url = format!("sqlite://{}", path.display());
-        let options = SqliteConnectOptions::from_str(&url)?
+        // `filename` takes the path verbatim; a URL would need `?`, `#`, `%` and spaces escaped.
+        let options = SqliteConnectOptions::new()
+            .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
@@ -45,7 +45,7 @@ impl Database {
     /// since `cutoff`. Returns the number of conversations removed.
     pub async fn purge_before(&self, cutoff: DateTime<Utc>) -> anyhow::Result<u64> {
         let result = sqlx::query("DELETE FROM conversations WHERE last_seen < ?")
-            .bind(cutoff.to_rfc3339())
+            .bind(repo::ts(cutoff))
             .execute(&self.pool)
             .await?;
         if result.rows_affected() > 0 {
@@ -69,5 +69,20 @@ pub async fn retention_loop(db: Database, retention_days: u32) {
             Err(e) => tracing::warn!(error = %e, "retention sweep failed"),
         }
         tokio::time::sleep(interval).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn opens_paths_that_would_break_a_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("odd dir #1 ?x=%41").join("cg.db");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let db = Database::connect(&path).await.unwrap();
+        assert!(db.ping().await);
+        assert!(path.exists(), "database created at the literal path");
     }
 }

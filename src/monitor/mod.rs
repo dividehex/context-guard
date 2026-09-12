@@ -22,7 +22,7 @@ use crate::telemetry::event::{ConversationEvent, EventKind, Message, Role};
 use identifiers::{IdKind, Identifier};
 use known_values::{KnownValue, ValueKind};
 use scoring::{Signal, WindowAnomaly};
-use text::sha256_hex;
+use text::{redact_secrets, sha256_hex};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Scored {
@@ -74,6 +74,7 @@ impl Monitor {
                 event.conversation_id_source.as_str(),
                 event.user_id.as_deref(),
                 &event.model,
+                event.kind == EventKind::Chat,
                 event.timestamp,
             )
             .await?;
@@ -145,6 +146,8 @@ impl Monitor {
         };
 
         for f in &findings {
+            // Details quote conversation values and travel to logs, the API and the UI.
+            let detail = redact_secrets(&f.detail);
             let inserted = self
                 .db
                 .insert_anomaly(NewAnomaly {
@@ -154,13 +157,13 @@ impl Monitor {
                     signal: f.signal.as_str(),
                     penalty: self.config.penalties.for_signal(f.signal),
                     severity: f.signal.severity(),
-                    detail: &f.detail,
+                    detail: &detail,
                     dedupe_key: &f.dedupe_key,
                 })
                 .await?;
             if inserted {
                 self.metrics.record_anomaly(&event.model, f.signal);
-                tracing::info!(conversation = cid, turn, signal = f.signal.as_str(), detail = %f.detail, "anomaly recorded");
+                tracing::info!(conversation = cid, turn, signal = f.signal.as_str(), detail = %detail, "anomaly recorded");
             }
         }
 

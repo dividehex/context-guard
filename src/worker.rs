@@ -71,5 +71,5 @@ pub async fn run(
             }
         }
     }
-    tracing::warn!("ingest queue closed; worker exiting");
+    tracing::info!("ingest queue closed; worker exiting");
 }

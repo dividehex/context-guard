@@ -22,6 +22,7 @@ import asyncio
 import logging
 import time
 from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import quote
 
 import aiohttp
 from pydantic import BaseModel, Field
@@ -119,8 +120,11 @@ class Filter:
 
     async def _wait_for_result(self, chat_id: str, message_id: str, reply_ts: Optional[float]) -> Optional[dict]:
         base = self.valves.context_guard_url.rstrip("/")
-        by_message = f"{base}/api/v1/conversations/{chat_id}/health?message_id={message_id}"
-        by_time = f"{base}/api/v1/conversations/{chat_id}/health?after={reply_ts - 1:.3f}" if reply_ts else None
+        # Both ids come from the request; encode them so they can only ever name a path
+        # segment and a query value, never another route.
+        health = f"{base}/api/v1/conversations/{quote(str(chat_id), safe='')}/health"
+        by_message = f"{health}?message_id={quote(str(message_id), safe='')}"
+        by_time = f"{health}?after={reply_ts - 1:.3f}" if reply_ts else None
         deadline = time.monotonic() + max(0.0, self.valves.wait_seconds)
         timeout = aiohttp.ClientTimeout(total=max(0.1, self.valves.connect_timeout))
         used_fallback = False

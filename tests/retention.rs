@@ -9,7 +9,7 @@ async fn purge_removes_stale_conversations_and_everything_they_own() {
     let now = Utc::now();
     let old_seen = now - Duration::days(40);
 
-    db.touch_conversation("old", "chat_tag", None, "m", old_seen)
+    db.touch_conversation("old", "chat_tag", None, "m", true, old_seen)
         .await
         .unwrap();
     db.insert_event(NewEvent {
@@ -44,7 +44,7 @@ async fn purge_removes_stale_conversations_and_everything_they_own() {
     db.upsert_known_value("old", "port", "", "8080", "user", 1)
         .await
         .unwrap();
-    db.touch_conversation("fresh", "chat_tag", None, "m", now)
+    db.touch_conversation("fresh", "chat_tag", None, "m", true, now)
         .await
         .unwrap();
 

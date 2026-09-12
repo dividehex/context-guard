@@ -3,7 +3,7 @@
 //! reports it. It is never in the inference path.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use context_guard::{api, config::Config, database, metrics, monitor, worker};
 use tokio::sync::mpsc;
@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<worker::Batch>(config.queue_size);
 
     let monitor = monitor::Monitor::new(db.clone(), config.clone(), metrics.clone());
-    tokio::spawn(worker::run(rx, monitor, config.clone(), metrics.clone()));
+    let worker = tokio::spawn(worker::run(rx, monitor, config.clone(), metrics.clone()));
     tokio::spawn(database::retention_loop(db.clone(), config.retention_days));
 
     let state = api::AppState {
@@ -44,15 +44,16 @@ async fn main() -> anyhow::Result<()> {
         started: Instant::now(),
     };
 
+    let mut metrics_listener = None;
     if let Some(addr) = config.metrics_listen.clone() {
         let router = api::metrics_router(state.clone());
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         tracing::info!(%addr, "metrics listener ready");
-        tokio::spawn(async move {
+        metrics_listener = Some(tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, router).await {
                 tracing::error!(error = %e, "metrics listener failed");
             }
-        });
+        }));
     }
 
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
@@ -60,9 +61,21 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    // Every queue sender is gone once both routers are dropped; the worker then
+    // drains what it holds and exits, so a turn is not cut off between writes.
+    if let Some(task) = metrics_listener {
+        task.abort();
+    }
+    if tokio::time::timeout(SHUTDOWN_DRAIN, worker).await.is_err() {
+        tracing::warn!("worker did not drain in time; exiting with queued batches");
+    }
     tracing::info!("context guard stopped");
     Ok(())
 }
+
+/// How long shutdown waits for the worker to finish queued batches.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(5);
 
 fn init_tracing(json: bool) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));

@@ -1,12 +1,48 @@
 //! Deterministic text helpers shared by the signal modules.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub fn sha256_hex(input: &str) -> String {
     hex::encode(Sha256::digest(input.as_bytes()))
+}
+
+static SECRET_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[_-])(?:api[_-]?key|key|token|secret|password|passwd|pwd|credentials?|auth)(?:$|[_-])")
+        .unwrap()
+});
+
+/// `NAME=value` / `name: value` with a secret-looking name, and well-known
+/// token shapes (OpenAI, GitHub, Slack, AWS, Google keys, JWTs, bearer tokens).
+static SECRET_VALUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r#"(?i)\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|key|token|secret|password|passwd|pwd|credentials?|auth)(?:[_-][a-z0-9]+)*\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|[^\s"',;]+)"#,
+        r"|\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b",
+        r"|(?i)\b(bearer\s+)([A-Za-z0-9._~+/=-]{16,})",
+    ))
+    .unwrap()
+});
+
+pub const REDACTED: &str = "[redacted]";
+
+/// Does an identifier look like it names a key, token or password?
+pub fn is_secret_name(name: &str) -> bool {
+    SECRET_NAME_RE.is_match(name)
+}
+
+/// Replace values that look like keys, tokens or passwords with `[redacted]`,
+/// so a string is safe to log or to show outside the conversation.
+pub fn redact_secrets(text: &str) -> String {
+    SECRET_VALUE_RE
+        .replace_all(text, |c: &regex::Captures| {
+            let prefix = c.get(1).or_else(|| c.get(4)).map_or("", |m| m.as_str());
+            format!("{prefix}{REDACTED}")
+        })
+        .into_owned()
 }
 
 /// Lowercase, punctuation stripped, whitespace collapsed.
@@ -127,6 +163,51 @@ mod tests {
         assert_eq!(levenshtein("kitten", "sitting"), 3);
         assert_eq!(levenshtein("", "abc"), 3);
         assert_eq!(levenshtein("same", "same"), 0);
+    }
+
+    #[test]
+    fn secret_names_are_recognized() {
+        for name in [
+            "OPENAI_API_KEY",
+            "LITELLM_MASTER_KEY",
+            "token",
+            "DB_PASSWORD",
+            "aws-secret-access-key",
+            "AUTH_HEADER",
+            "passwd",
+        ] {
+            assert!(is_secret_name(name), "{name}");
+        }
+        for name in [
+            "PORT",
+            "CONTEXT_GUARD_RETENTION_DAYS",
+            "monkey",
+            "keyboard",
+            "HOSTNAME",
+        ] {
+            assert!(!is_secret_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn secret_values_are_redacted_and_ordinary_text_is_kept() {
+        let cases = [
+            (
+                "set OPENAI_API_KEY=sk-live-abcdefghijklmnopqrstuvwxyz0123 and PORT=8080",
+                "set OPENAI_API_KEY=[redacted] and PORT=8080",
+            ),
+            ("api_key: \"abc\" then token = x-y-z", "api_key: [redacted] then token = [redacted]"),
+            (
+                "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+                "Authorization: Bearer [redacted]",
+            ),
+            ("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 and AKIAIOSFODNN7EXAMPLE", "[redacted] and [redacted]"),
+            ("llama.cpp listens on port 8080 at /etc/llama-swap/config.yaml", "llama.cpp listens on port 8080 at /etc/llama-swap/config.yaml"),
+            ("the keyboard=us layout and monkey: 3", "the keyboard=us layout and monkey: 3"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_secrets(input), expected, "{input}");
+        }
     }
 
     #[test]

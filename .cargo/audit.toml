@@ -1,0 +1,10 @@
+# cargo-audit configuration. Run `cargo audit` from the repository root.
+
+[advisories]
+ignore = [
+    # rsa (Marvin timing side channel). Present in Cargo.lock only because sqlx's
+    # optional MySQL driver lists it; this crate builds sqlx with SQLite alone, so
+    # `cargo tree -i rsa` prints nothing and the code is never compiled or linked.
+    # No fixed rsa release exists. Re-check whenever sqlx is upgraded.
+    "RUSTSEC-2023-0071",
+]

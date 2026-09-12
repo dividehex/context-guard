@@ -197,6 +197,14 @@ impl Config {
         }
         if let Some(v) = non_empty(env, "CONTEXT_GUARD_RETENTION_DAYS") {
             cfg.retention_days = parse_number("CONTEXT_GUARD_RETENTION_DAYS", v)?;
+            if cfg.retention_days == 0 {
+                // 0 would delete every conversation, active ones included, on each hourly sweep.
+                return Err(invalid(
+                    "CONTEXT_GUARD_RETENTION_DAYS",
+                    v,
+                    "must be at least 1",
+                ));
+            }
         }
         if let Some(v) = non_empty(env, "CONTEXT_GUARD_QUEUE_SIZE") {
             cfg.queue_size = parse_number("CONTEXT_GUARD_QUEUE_SIZE", v)?;
@@ -335,6 +343,7 @@ mod tests {
         assert!(Config::from_env(&env(&[("CONTEXT_GUARD_RETENTION_DAYS", "soon")])).is_err());
         assert!(Config::from_env(&env(&[("CONTEXT_GUARD_MODEL_LIMITS", "qwen3")])).is_err());
         assert!(Config::from_env(&env(&[("CONTEXT_GUARD_QUEUE_SIZE", "0")])).is_err());
+        assert!(Config::from_env(&env(&[("CONTEXT_GUARD_RETENTION_DAYS", "0")])).is_err());
     }
 
     #[test]

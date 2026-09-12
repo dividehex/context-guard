@@ -8,7 +8,7 @@ use super::Database;
 
 type Result<T> = std::result::Result<T, sqlx::Error>;
 
-fn ts(t: DateTime<Utc>) -> String {
+pub(crate) fn ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -154,12 +154,16 @@ impl Database {
         Ok(row.is_some())
     }
 
+    /// Create or refresh a conversation. The stored model follows chat turns
+    /// only (`is_turn`): background tasks often run on a different model and
+    /// must not relabel the chat.
     pub async fn touch_conversation(
         &self,
         id: &str,
         id_source: &str,
         user_id: Option<&str>,
         model: &str,
+        is_turn: bool,
         seen: DateTime<Utc>,
     ) -> Result<()> {
         sqlx::query(
@@ -167,7 +171,7 @@ impl Database {
              VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                last_seen = MAX(last_seen, excluded.last_seen),
-               model = excluded.model,
+               model = COALESCE(?, conversations.model),
                user_id = COALESCE(excluded.user_id, conversations.user_id)",
         )
         .bind(id)
@@ -176,6 +180,7 @@ impl Database {
         .bind(model)
         .bind(ts(seen))
         .bind(ts(seen))
+        .bind(is_turn.then_some(model))
         .execute(self.pool())
         .await?;
         Ok(())

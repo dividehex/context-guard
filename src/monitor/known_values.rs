@@ -8,6 +8,8 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::Serialize;
 
+use super::text::is_secret_name;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValueKind {
@@ -53,6 +55,24 @@ impl ValueKind {
             "numeric_cfg" => ValueKind::NumericCfg,
             _ => return None,
         })
+    }
+
+    /// Kinds whose value describes an attribute of some entity (the port *of*
+    /// a host, the version *of* a package), as opposed to kinds whose value
+    /// *is* the entity: a path, URL, hostname or container name identifies a
+    /// thing, so a different one is a different thing, not a contradiction.
+    /// Only attributes can drift; near-duplicate names are the
+    /// suspicious-identifier signal's job.
+    fn describes_attribute(self) -> bool {
+        match self {
+            ValueKind::Ipv4
+            | ValueKind::Ipv6
+            | ValueKind::Port
+            | ValueKind::EnvVar
+            | ValueKind::Version
+            | ValueKind::NumericCfg => true,
+            ValueKind::Url | ValueKind::Path | ValueKind::Hostname | ValueKind::Container => false,
+        }
     }
 }
 
@@ -262,6 +282,9 @@ pub fn extract(text: &str, container_prefixes: &[String]) -> Vec<Extracted> {
     }
 
     for c in ENV_ASSIGN_RE.captures_iter(text) {
+        if is_secret_name(&c[1]) {
+            continue; // a key or password is not a fact to check claims against, and must not be quoted
+        }
         let value = c[2].trim_matches(['"', '\'']).to_string();
         push(Extracted {
             kind: ValueKind::EnvVar,
@@ -344,7 +367,7 @@ pub fn extract(text: &str, container_prefixes: &[String]) -> Vec<Extracted> {
 /// Flag assistant claims that contradict an unambiguous user-established value.
 pub fn detect_drift(claims: &[Extracted], registry: &[KnownValue]) -> Vec<Drift> {
     let mut drifts: Vec<Drift> = Vec::new();
-    for claim in claims {
+    for claim in claims.iter().filter(|c| c.kind.describes_attribute()) {
         let same_entity: Vec<&KnownValue> = registry
             .iter()
             .filter(|k| k.kind == claim.kind && k.anchor == claim.anchor)
@@ -600,6 +623,47 @@ mod tests {
         ];
         // 4000 was established (for another anchor): the assistant may be talking about that.
         assert!(detect_drift(&ex("llama.cpp listens on port 4000"), &registry).is_empty());
+    }
+
+    #[test]
+    fn secret_env_vars_are_never_learned() {
+        let v =
+            ex("export OPENAI_API_KEY=sk-live-abcdef0123456789 DB_PASSWORD='hunter2' PORT=6379");
+        assert!(has(&v, ValueKind::EnvVar, "PORT", "6379"));
+        assert!(
+            v.iter()
+                .all(|e| e.anchor != "OPENAI_API_KEY" && e.anchor != "DB_PASSWORD"),
+            "{v:?}"
+        );
+        // So an assistant showing a placeholder for the key is not "drift".
+        let registry: Vec<KnownValue> = v
+            .iter()
+            .map(|e| known(e.kind, &e.anchor, &e.value))
+            .collect();
+        assert!(detect_drift(&ex("set OPENAI_API_KEY=your-key-here"), &registry).is_empty());
+    }
+
+    #[test]
+    fn a_different_path_url_host_or_container_is_not_drift() {
+        let facts = ex("llama.cpp runs in container ai-llama-swap, config /etc/llama-swap/config.yaml, docs at https://docs.example.com/x on host docs.example.com");
+        let registry: Vec<KnownValue> = facts
+            .iter()
+            .map(|e| known(e.kind, &e.anchor, &e.value))
+            .collect();
+        assert!(registry.iter().any(|k| k.kind == ValueKind::Path));
+        assert!(registry.iter().any(|k| k.kind == ValueKind::Container));
+        let claims = ex("Also check /var/log/syslog, restart ai-litellm, and see https://github.com/ggml-org/llama.cpp or wiki.example.org");
+        assert!(
+            detect_drift(&claims, &registry).is_empty(),
+            "{:?}",
+            detect_drift(&claims, &registry)
+        );
+        // Attributes still drift: the one known port for that anchor.
+        let d = detect_drift(
+            &ex("llama.cpp is on port 8000"),
+            &[known(ValueKind::Port, "llama.cpp", "8080")],
+        );
+        assert_eq!(d.len(), 1);
     }
 
     #[test]

@@ -213,3 +213,15 @@ def test_reply_timestamp_helpers():
     assert f._should_show("healthy")
     f.valves.show_minimum = "watch"
     assert f._should_show("unknown-status")
+
+
+def test_ids_are_url_encoded(stub):
+    """A chat or message id with URL syntax stays a single path segment / query value."""
+    # aiohttp keeps the encoded slash and space in the path; a "?" inside the query value is
+    # unambiguous, so it re-normalizes to the literal character.
+    path = "/api/v1/conversations/a%2Fb%20c/health?message_id=m?1%26x%3Dy"
+    stub.responses[path] = [(200, HEALTH)]
+    f, em = make_filter(stub.url), Emitter()
+    run(f.outlet(dict(BODY), em, {"chat_id": "a/b c", "message_id": "m?1&x=y"}))
+    assert stub.requests == [path]
+    assert em.events and em.events[0]["type"] == "status"

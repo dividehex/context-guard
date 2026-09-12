@@ -158,6 +158,9 @@ The model receives exactly the request it would receive without Context Guard:
   worker continues. If the database cannot be opened at startup the process
   exits non-zero so the container restarts.
 * Events are deduplicated by LiteLLM's payload id, so redelivery is harmless.
+* On SIGTERM the API stops accepting requests and the worker gets up to five
+  seconds to finish the batches it already holds, so a turn is not cut off
+  between writes.
 * The filter only reads, returns the body untouched, and gives up silently
   after one refused connection (about one second).
 
@@ -271,11 +274,17 @@ A claim is drift only when **all** of these hold:
 1. the registry has **exactly one** value for the same kind and anchor,
 2. the claimed value differs from it,
 3. the claimed value never appeared in any user or tool message of the chat,
-4. the value was recognized with its kind marker (no bare numbers).
+4. the value was recognized with its kind marker (no bare numbers),
+5. the kind describes an attribute of something (IP, port, env var, version,
+   setting). A path, URL, hostname or container name *is* the thing, so a
+   different one is a different thing, not a contradiction; near-duplicates of
+   those are the suspicious-identifier signal's job.
 
 So "the API is on port 4000" followed by an assistant "the API on port 4100"
 is drift; "open port 3000 for the UI" is not, because no anchored value
 conflicts; and if the user themself mentioned 4100 earlier, nothing fires.
+`ENV_VAR=value` pairs whose name looks like a key, token or password are never
+learned, so an assistant showing `OPENAI_API_KEY=your-key-here` is not drift.
 False positives are treated as worse than misses.
 
 ## REST API
@@ -344,7 +353,7 @@ listener serves `/metrics` and `/healthz` and nothing else.
 | `CONTEXT_GUARD_LISTEN` | `0.0.0.0:7432` | API listener |
 | `CONTEXT_GUARD_METRICS_LISTEN` | unset | optional `/metrics`-only listener |
 | `CONTEXT_GUARD_DATABASE` | `/data/context-guard.db` | SQLite file (WAL mode) |
-| `CONTEXT_GUARD_RETENTION_DAYS` | 30 | hourly purge of conversations not seen for this long |
+| `CONTEXT_GUARD_RETENTION_DAYS` | 30 | hourly purge of conversations not seen for this long (at least 1) |
 | `CONTEXT_GUARD_CONFIG` | unset | optional TOML with `[penalties]`, `[thresholds]`, `[scoring]`, `[model_limits]` |
 | `CONTEXT_GUARD_MODEL_LIMITS` | unset | `model=tokens,model=tokens`; overrides the payload's limit |
 | `CONTEXT_GUARD_QUEUE_SIZE` | 1024 | bounded ingest queue (batches); full ⇒ dropped and counted |
@@ -368,14 +377,18 @@ port bound to localhost or the internal network. Prometheus output never
 includes conversation ids or text. Default logging never includes message or
 response text: ids, counts, hashes and anomaly details only, with values that
 look like keys, tokens or passwords redacted. Anomaly details do quote the
-specific conflicting values (e.g. `8080` vs `8000`).
+specific conflicting values (e.g. `8080` vs `8000`), and they are stored,
+served and logged only after the same redaction (`NAME=value` with a
+secret-looking name, and common API-key, GitHub, Slack, AWS, Google, JWT and
+bearer-token shapes become `[redacted]`).
 
 ## Build and test
 
 ```sh
 cargo build --release
-cargo test                                   # 65 unit + integration tests, temp SQLite; also spawns the real binary
+cargo test                                   # 71 unit + integration tests, temp SQLite; also spawns the real binary
 cargo clippy --all-targets -- -D warnings
+cargo audit                                  # RustSec advisories; `cargo install cargo-audit`
 docker build -t context-guard .              # multi-stage; runtime is debian-slim, uid 10001
 ```
 
@@ -397,8 +410,9 @@ scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model> [
 `docs/ui-demo.md` is the interactive version: messages to type into an Open
 WebUI chat, each with the status line it produces.
 
-CI (`.github/workflows/ci.yml`) runs rustfmt, clippy, the Rust tests, the
-filter tests, and a build-and-smoke-test of the Docker image on every push.
+CI (`.github/workflows/ci.yml`) runs rustfmt, clippy, the Rust tests, `cargo
+audit`, the filter tests, and a build-and-smoke-test of the Docker image on
+every push.
 
 ## Current limitations
 

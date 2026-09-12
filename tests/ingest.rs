@@ -87,12 +87,14 @@ async fn scores_turns_with_context_pressure_drift_and_tool_signals() {
     assert_eq!(r3["signals"]["loop_events"], json!(1));
     assert_eq!(r3["signals"]["known_value_drift"], json!(1));
 
-    // A background task with the same chat id is recorded but does not become a turn.
+    // A background task with the same chat id is recorded but does not become a turn,
+    // and the task model (Open WebUI can use a different one) does not relabel the chat.
     let task = PayloadBuilder::new("ev-task", CHAT, "")
         .tag("x-openwebui-task: title_generation")
         .messages(json!([user("Create a title")]))
         .response("Port question")
         .set("stream", json!(false))
+        .set("model_group", json!("task-model"))
         .build();
     // Re-delivering turn 2 is a no-op.
     h.ingest(vec![task, t2]).await;
@@ -100,6 +102,7 @@ async fn scores_turns_with_context_pressure_drift_and_tool_signals() {
     let latest = h.wait_for_turns(CHAT, 3).await;
     assert_eq!(latest["turn"], json!(3));
     assert_eq!(latest["message_id"], json!("msg-3"));
+    assert_eq!(latest["model"], json!("test-model"));
 
     // History and listing.
     let (status, history) = h
@@ -112,6 +115,7 @@ async fn scores_turns_with_context_pressure_drift_and_tool_signals() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(list["conversations"][0]["conversation_id"], json!(CHAT));
     assert_eq!(list["conversations"][0]["turns"], json!(3));
+    assert_eq!(list["conversations"][0]["model"], json!("test-model"));
     let (status, filtered) = h.get("/api/v1/conversations?status=healthy").await;
     assert_eq!(status, StatusCode::OK);
     assert!(filtered["conversations"].as_array().unwrap().is_empty());
@@ -215,4 +219,45 @@ async fn context_window_overflow_scores_red() {
         r["summary"],
         json!("🟢 Context Guard 80 · good · 🔴 context overflow (16,456/10,000)")
     );
+}
+
+#[tokio::test]
+async fn anomaly_details_never_quote_secrets() {
+    let h = harness().await;
+    let t1 = PayloadBuilder::new("s-1", "chat-s", "m1")
+        .messages(json!([user(
+            "the webhook setting is HOOK_ID=sk-live-abcdefghijklmnopqrstuvwxyz0123"
+        )]))
+        .response("Noted.")
+        .times(1.0, 2.0)
+        .build();
+    h.ingest(vec![t1]).await;
+    h.wait_for_message("chat-s", "m1").await;
+    let t2 = PayloadBuilder::new("s-2", "chat-s", "m2")
+        .messages(json!([
+            user("the webhook setting is HOOK_ID=sk-live-abcdefghijklmnopqrstuvwxyz0123"),
+            assistant("Noted."),
+            user("repeat it")
+        ]))
+        .response("Use HOOK_ID=sk-live-zzzzzzzzzzzzzzzzzzzzzzzzzz9999 for the webhook.")
+        .times(3.0, 4.0)
+        .build();
+    h.ingest(vec![t2]).await;
+    let r = h.wait_for_message("chat-s", "m2").await;
+    assert_eq!(r["signals"]["known_value_drift"], json!(1), "{r}");
+    let text = r.to_string();
+    assert!(!text.contains("sk-live-"), "{text}");
+    assert!(text.contains("[redacted]"), "{text}");
+
+    // A key the user pastes under a secret-looking name is not a fact at all.
+    let t3 = PayloadBuilder::new("s-3", "chat-s2", "m1")
+        .messages(json!([user(
+            "export OPENAI_API_KEY=sk-live-abcdefghijklmnopqrstuvwxyz0123"
+        )]))
+        .response("Set OPENAI_API_KEY=your-key-here in the environment.")
+        .times(1.0, 2.0)
+        .build();
+    h.ingest(vec![t3]).await;
+    let r = h.wait_for_message("chat-s2", "m1").await;
+    assert_eq!(r["score"], json!(100), "{r}");
 }

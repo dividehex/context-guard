@@ -17,10 +17,11 @@ pub const TAG_USER_ID: &str = "x-openwebui-user-id";
 pub const TAG_MESSAGE_ID: &str = "x-openwebui-message-id";
 pub const TAG_TASK: &str = "x-openwebui-task";
 
-/// Parse `request_tags` into a lowercase-keyed map. Tags without `: ` are ignored.
-pub fn parse_tags(tags: &[Value]) -> HashMap<String, String> {
+/// Parse `request_tags` into a lowercase-keyed map. Anything that is not a
+/// list of `"key: value"` strings is ignored rather than rejected.
+pub fn parse_tags(tags: &Value) -> HashMap<String, String> {
     let mut out = HashMap::new();
-    for tag in tags {
+    for tag in tags.as_array().map(Vec::as_slice).unwrap_or_default() {
         let Some(text) = tag.as_str() else { continue };
         let Some((key, value)) = text.split_once(':') else {
             continue;
@@ -91,16 +92,18 @@ mod tests {
 
     #[test]
     fn tags_parse_case_insensitively_and_skip_junk() {
-        let tags = parse_tags(&[
-            json!("X-OpenWebUI-Chat-Id: abc-123"),
-            json!("User-Agent: OpenAI"),
-            json!("garbage"),
-            json!(42),
-            json!("x-openwebui-task: "),
-        ]);
+        let tags = parse_tags(&json!([
+            "X-OpenWebUI-Chat-Id: abc-123",
+            "User-Agent: OpenAI",
+            "garbage",
+            42,
+            "x-openwebui-task: ",
+        ]));
         assert_eq!(tags.get(TAG_CHAT_ID).map(String::as_str), Some("abc-123"));
         assert_eq!(tags.get("user-agent").map(String::as_str), Some("OpenAI"));
         assert!(!tags.contains_key(TAG_TASK));
+        assert!(parse_tags(&Value::Null).is_empty());
+        assert!(parse_tags(&json!("nope")).is_empty());
     }
 
     #[test]
