@@ -65,21 +65,29 @@ pub fn orphan_results(messages: &[Message]) -> Vec<String> {
 }
 
 /// Strings in assistant text that look like this conversation's tool-call ids
-/// (same prefix as the ids actually seen) but were never issued.
+/// but were never issued. Two id styles are recognized:
+/// * prefixed ids (`call_abc123`): anything with the same prefix;
+/// * opaque ids (llama.cpp's random alphanumeric strings): any token of the
+///   same length that mixes letters and digits, when every known id shares
+///   that length (≥ 16, so ordinary words never qualify).
 pub fn unknown_call_id_references(text: &str, known_ids: &[String]) -> Vec<String> {
-    let Some(prefix) = id_prefix(known_ids) else {
-        return Vec::new();
+    let pattern = match id_prefix(known_ids) {
+        Some(prefix) => format!(r"\b{}[A-Za-z0-9_-]{{4,}}\b", regex::escape(&prefix)),
+        None => match opaque_id_length(known_ids) {
+            Some(len) => format!(r"\b[A-Za-z0-9]{{{len}}}\b"),
+            None => return Vec::new(),
+        },
     };
-    let Ok(re) = Regex::new(&format!(
-        r"\b{}[A-Za-z0-9_-]{{4,}}\b",
-        regex::escape(&prefix)
-    )) else {
+    let Ok(re) = Regex::new(&pattern) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for m in re.find_iter(text) {
         let candidate = m.as_str();
-        if !known_ids.iter().any(|k| k == candidate) && !out.iter().any(|o| o == candidate) {
+        let mixed = candidate.chars().any(|c| c.is_ascii_digit())
+            && candidate.chars().any(|c| c.is_ascii_alphabetic());
+        if mixed && !known_ids.iter().any(|k| k == candidate) && !out.iter().any(|o| o == candidate)
+        {
             out.push(candidate.to_string());
         }
     }
@@ -102,6 +110,17 @@ fn id_prefix(ids: &[String]) -> Option<String> {
     let cut = prefix.rfind(['_', '-'])? + 1;
     let prefix = &prefix[..cut];
     (prefix.len() >= 3).then(|| prefix.to_string())
+}
+
+/// Length shared by every known id when they are all opaque alphanumeric
+/// strings of at least 16 characters.
+fn opaque_id_length(ids: &[String]) -> Option<usize> {
+    let len = ids.first()?.chars().count();
+    let uniform = len >= 16
+        && ids
+            .iter()
+            .all(|id| id.chars().count() == len && id.chars().all(|c| c.is_ascii_alphanumeric()));
+    uniform.then_some(len)
 }
 
 #[cfg(test)]
@@ -156,6 +175,30 @@ mod tests {
         );
         assert!(unknown_call_id_references("no ids here", &known).is_empty());
         assert!(unknown_call_id_references("call_zzz999", &[]).is_empty());
+    }
+
+    #[test]
+    fn opaque_ids_are_matched_by_shape() {
+        let known = vec![
+            "ror5TFvcNJYJX2fnQ7Lm9aBcD1eF".to_string(),
+            "Kp3xLm9QwErTyUiOpAsDfGhJkL12".to_string(),
+        ];
+        let text =
+            "call ror5TFvcNJYJX2fnQ7Lm9aBcD1eF was fine but Zz9x7q4mAbCdEfGhIjKlMnOpQr5T failed";
+        assert_eq!(
+            unknown_call_id_references(text, &known),
+            vec!["Zz9x7q4mAbCdEfGhIjKlMnOpQr5T".to_string()]
+        );
+        // Same length but no digits: a word, not an id.
+        assert!(
+            unknown_call_id_references("Supercalifragilisticexpialido is long", &known).is_empty()
+        );
+        // Mixed lengths give no shape to learn from.
+        let mixed = vec![
+            "abc123abc123abc123".to_string(),
+            "abc123abc123abc123abc".to_string(),
+        ];
+        assert!(unknown_call_id_references("Zz9x7q4mAbCdEfGhIj", &mixed).is_empty());
     }
 
     #[test]

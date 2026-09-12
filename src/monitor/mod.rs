@@ -402,7 +402,7 @@ impl Monitor {
             findings.push(Finding {
                 signal: Signal::ToolResultWithoutCall,
                 detail: format!("tool result {orphan} has no matching tool call in the request"),
-                dedupe_key: format!("orphan:{turn}:{orphan}"),
+                dedupe_key: format!("orphan:{orphan}"), // once per id: the message stays in history for every later request
             });
         }
         for m in delta.iter().filter(|m| m.role == Role::Tool) {

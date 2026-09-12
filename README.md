@@ -283,7 +283,7 @@ Each chat completion is one **turn**. For every turn:
    | `response_loop` | 5 | the reply (≥ 20 words) has Jaccard similarity ≥ 0.90 of word 3-shingles with at least 2 of the previous 3 replies |
    | `known_value_drift` | 15 | see below |
    | `tool_result_without_call` | 20 | a `tool` message's `tool_call_id` was not issued by an earlier assistant message in the same request |
-   | `tool_call_id_reference_unknown` | 25 | the reply cites an id with the same prefix as the conversation's real tool-call ids that was never issued |
+   | `tool_call_id_reference_unknown` | 25 | the reply cites something shaped like the conversation's real tool-call ids (same `call_` prefix, or for opaque ids such as llama.cpp's, the same length with letters and digits) that was never issued |
    | `suspicious_identifier` | 5 | the reply introduces a name that is not known but is within 20 % edit distance of, or extends by prefix (≥ 6 shared chars), a known model, container, host, tool or name; paths and env vars use edit distance only |
 
 3. **Risk** = context penalty + the penalties of every anomaly recorded in the
@@ -381,6 +381,25 @@ are counted from events and known values persist per conversation.
   Context Guard was deployed only reflects turns seen since then.
 * No authentication; rely on network placement.
 * One process, one SQLite file; sized for a personal or small-team stack.
+
+## End-to-end degradation test
+
+`scripts/e2e_degradation.py` drives one scripted chat through the live
+LiteLLM (with Open WebUI's headers) and a real model, and checks after every
+turn that Context Guard recorded the expected signal and score, walking the
+chat from 100 down to "reset recommended":
+
+```sh
+scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model qwen3-30b-a3b
+# optional: pad a small model's prompt to ~75 % of its limit
+scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --context-model qwen3-vl-4b
+```
+
+Scripted assistant wording uses an echo system prompt with a minimal request
+history, so the model repeats it verbatim; Context Guard still judges it
+against the facts the user stated in earlier turns because it keeps its
+registry per conversation, not per request. Tool-call stages use the model
+for real. The script needs only Python 3 and prints PASS/FAIL per stage.
 
 ## Repository layout
 
