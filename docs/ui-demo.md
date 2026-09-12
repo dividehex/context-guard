@@ -64,31 +64,36 @@ chat with it. Generate about 9,500 tokens of filler:
 python3 -c "print('The quick brown fox jumps over the lazy dog near the river bank at dawn. ' * 550)" > /tmp/filler.txt
 ```
 
-Paste the contents of `/tmp/filler.txt` followed by `Reply with the single word OK.`
+Then get the whole file into the model's context. Attaching it is not enough
+on its own: Open WebUI treats attached files as retrieval sources and hands
+the model only a few matching chunks, so the context barely moves.
 
-Instead of pasting, let Open WebUI's code interpreter (Pyodide) generate the
-filler inside the chat: turn on **Code Interpreter** in the chat input's
-integrations menu, then send:
+**Route A, attach with entire-document mode.** Attach `/tmp/filler.txt`,
+click the file chip in the input box, switch it from *Using Focused
+Retrieval* to **Using Entire Document**, then send:
 
 ```text
-Use the code interpreter to execute the Python below and wait for its result. Only after the result is available, reply with the single word OK and nothing else.
-print("The quick brown fox jumps over the lazy dog near the river bank at dawn. " * 550)
+Reply with the single word OK.
 ```
 
-Open WebUI runs the code in the browser, appends the output to the reply, and
-calls the model again with the output in the context. That second call is
-the one that carries ~9,500 prompt tokens; the filter waits for it and shows
-its score, so the status line reads the same as with pasting. Two things to
-know: asked to *show* the output, the model regenerates all 9,500 tokens as
-its reply, which takes minutes; and told too bluntly to just say OK, it skips
-running the code. The wording above asks for both in order.
+**Route B, paste as text.** In Settings → Interface turn off *Paste Large
+Text as File* (otherwise a large paste silently becomes an attachment), paste
+the file's contents into the message box, and add `Reply with the single word OK.`
 
-Sizing, in a fresh chat on this model: 550 repetitions land near 79 %
-(yellow), 650 near 88 % (orange), 750 past 90 % (red). Around 850 the
-follow-up request exceeds llama.cpp's real 16,384-token window and the model
-call fails; Context Guard scores that as `🔴 context overflow` with the
-request size, since a rejected request is the strongest context signal there is. A terminal tool
-server works the same way, with its output arriving as a `tool` message.
+Expected either way: `🟢 Context Guard 95 · healthy · 🟡 context 77% (9,4xx/12,288)`
+
+Sizing in a fresh chat on this model: 550 repetitions land near 79 %
+(yellow), 650 near 88 % (orange), 750 past 90 % (red). Around 850 the request
+exceeds llama.cpp's real 16,384-token window and the model call fails;
+Context Guard scores that as `🔴 context overflow` with the request size,
+since a rejected request is the strongest context signal there is.
+
+The code interpreter (Pyodide) can also carry the filler in, if the model
+actually writes the code: its output is appended to the reply and included
+in the follow-up model call. In practice the 4B model answers "OK" without
+running anything, so the file routes above are the reliable ones. The
+big-context chat cannot show this stage at all: Open WebUI compacts its
+history at 22,000 tokens, long before 70 % of 122,880.
 
 ## 8+. Tool signals (optional, needs a tool server)
 
