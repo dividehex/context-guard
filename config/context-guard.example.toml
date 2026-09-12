@@ -1,0 +1,25 @@
+# Optional Context Guard configuration. Point CONTEXT_GUARD_CONFIG at this file.
+# Environment variables override anything here. Every section is optional.
+
+[penalties]
+context_70 = 5                       # prompt tokens at 70-80 % of the context limit
+context_80 = 10                      # 80-90 %
+context_90 = 20                      # above 90 %
+repeated_tool_call = 5               # same normalized tool call 3 times in the last 5 calls
+response_loop = 5                    # near-identical consecutive assistant responses
+known_value_drift = 15               # assistant states a different value for a user-established fact
+tool_result_without_call = 20        # tool result whose call id was never issued in that request
+tool_call_id_reference_unknown = 25  # assistant text cites a tool-call id that does not exist
+suspicious_identifier = 5            # new identifier that closely resembles an established one
+
+[scoring]
+window_turns = 10                    # anomalies older than this many turns stop counting
+
+[thresholds]                         # inclusive lower bounds; healthy is >= 90
+good = 75
+watch = 60
+degraded = 40
+
+[model_limits]                       # context limits by LiteLLM model name (overrides the payload's max_input_tokens)
+# "qwen3-30b-a3b" = 122880
+# "fury/qwen3-8b" = 12288

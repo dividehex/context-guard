@@ -1,0 +1,31 @@
+# Paste the `context-guard` service into your existing compose file and add
+# the LiteLLM environment/config shown in the README. Nothing depends on this
+# service: if it is down, inference is unaffected.
+services:
+  context-guard:
+    build:
+      context: /home/jwatkins/dev/context-guard
+    image: ai-context-guard
+    container_name: ai-context-guard
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7432:7432"     # debugging only; Open WebUI and LiteLLM use the container name
+    volumes:
+      - ./data/context-guard:/data
+    environment:
+      RUST_LOG: info
+      CONTEXT_GUARD_DATABASE: /data/context-guard.db
+      CONTEXT_GUARD_RETENTION_DAYS: "30"
+      # CONTEXT_GUARD_MODEL_LIMITS: "qwen3-30b-a3b=122880,fury/qwen3-8b=12288"   # only if LiteLLM's model_info lacks max_input_tokens
+      # CONTEXT_GUARD_METRICS_LISTEN: 0.0.0.0:7433   # optional metrics-only listener for a LAN Prometheus (publish 7433 too)
+    networks:
+      - ai-backend
+
+  litellm:
+    environment:
+      GENERIC_LOGGER_ENDPOINT: http://context-guard:7432/api/v1/ingest/litellm
+      DEFAULT_FLUSH_INTERVAL_SECONDS: "1"
+
+networks:
+  ai-backend:
+    name: ai-backend
