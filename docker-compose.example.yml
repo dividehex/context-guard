@@ -3,7 +3,7 @@
 # Nothing depends on Context Guard: if it is down, inference is unaffected.
 #
 # `build.context` assumes this repository is cloned next to your compose file
-# (e.g. `git clone https://github.com/<you>/context-guard`); an absolute path
+# (e.g. `git clone https://github.com/dividehex/context-guard`); an absolute path
 # works too.
 services:
   context-guard:

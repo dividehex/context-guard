@@ -38,7 +38,7 @@ merge `docker-compose.example.yml` into it: one `context-guard` service on the
 same network as LiteLLM, with a `/data` volume.
 
 ```sh
-git clone https://github.com/<you>/context-guard
+git clone https://github.com/dividehex/context-guard
 mkdir -p data/context-guard
 docker compose up -d --build context-guard
 curl -s http://127.0.0.1:7432/healthz        # {"status":"ok","database":"ok",...}
@@ -415,7 +415,7 @@ src/metrics.rs  Prometheus registry
 src/worker.rs   queue consumer
 openwebui/      the Open WebUI filter, its tests, install script
 scripts/        end-to-end degradation test
-docs/           UI walkthrough and the original design plan
+docs/           UI walkthrough
 tests/          integration and fault-tolerance tests; real captured fixtures
 ```
 
