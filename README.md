@@ -384,6 +384,9 @@ are counted from events and known values persist per conversation.
 
 ## End-to-end degradation test
 
+To prove it interactively, `docs/ui-demo.md` is a walkthrough of messages to
+type into an Open WebUI chat, each with the status line it produces.
+
 `scripts/e2e_degradation.py` drives one scripted chat through the live
 LiteLLM (with Open WebUI's headers) and a real model, and checks after every
 turn that Context Guard recorded the expected signal and score, walking the
