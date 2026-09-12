@@ -71,14 +71,16 @@ filler inside the chat: turn on **Code Interpreter** in the chat input's
 integrations menu, then send:
 
 ```text
-Use the code interpreter to run this Python exactly as written and show its full output, then say OK:
+Run this Python with the code interpreter exactly as written. After it runs, reply with only the word OK. Do not repeat, summarize, or describe the output.
 print("The quick brown fox jumps over the lazy dog near the river bank at dawn. " * 550)
 ```
 
 Open WebUI runs the code in the browser, appends the output to the reply, and
 calls the model again with the output in the context. That second call is
 the one that carries ~9,500 prompt tokens; the filter waits for it and shows
-its score, so the status line reads the same as with pasting. A terminal tool
+its score, so the status line reads the same as with pasting. The "only the
+word OK" part matters: asked to show the output, the model regenerates all
+9,500 tokens as its reply, which takes minutes. A terminal tool
 server works the same way, with its output arriving as a `tool` message.
 
 ## 8+. Tool signals (optional, needs a tool server)
