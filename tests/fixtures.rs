@@ -6,7 +6,11 @@ use context_guard::telemetry::event::{EventKind, IdSource, Role};
 use context_guard::telemetry::litellm::{normalize, split_body};
 
 fn fixture(name: &str) -> Vec<u8> {
-    std::fs::read(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    std::fs::read(format!(
+        "{}/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
 }
 
 #[test]
@@ -22,10 +26,17 @@ fn real_non_streaming_turn_normalizes() {
     assert_eq!(ev.kind, EventKind::Chat);
     assert_eq!(ev.prompt_tokens, Some(44));
     assert_eq!(ev.completion_tokens, Some(13));
-    assert_eq!(ev.context_limit, Some(122_880), "max_input_tokens comes from LiteLLM's model_info");
+    assert_eq!(
+        ev.context_limit,
+        Some(122_880),
+        "max_input_tokens comes from LiteLLM's model_info"
+    );
     assert_eq!(ev.messages.len(), 1);
     assert_eq!(ev.messages[0].role, Role::User);
-    assert_eq!(ev.response_text.as_deref(), Some("Llama.cpp is using port 8080."));
+    assert_eq!(
+        ev.response_text.as_deref(),
+        Some("Llama.cpp is using port 8080.")
+    );
     assert!(ev.tool_calls.is_empty());
     assert_eq!(ev.timestamp.timestamp(), 1_789_217_570);
 }

@@ -211,17 +211,21 @@ pub fn score(
     }
 }
 
-/// One line for the Open WebUI status widget:
-/// `Context Guard 74 · watch · context 78% · 1 known-value drift · 1 repeated operation`
+/// One line for the Open WebUI status widget, e.g.
+/// `🟢 Context Guard 92 · healthy · 🟡 context 74% (90,800 / 122,880 tokens) · 1 known-value drift`
+///
+/// Two lights: the first is the health status, the second the context-window
+/// pressure. Both use the same colour scale so a glance tells the story.
 pub fn summary(score: &Score, context: &ContextAssessment, anomalies: &[WindowAnomaly]) -> String {
     let mut parts = vec![
-        format!("Context Guard {}", score.health),
+        format!(
+            "{} Context Guard {}",
+            health_light(score.status),
+            score.health
+        ),
         score.status.as_str().replace('_', " "),
+        context_phrase(context),
     ];
-    parts.push(match context.percent {
-        Some(p) => format!("context {p:.0}%"),
-        None => "context unknown".to_string(),
-    });
     let mut seen: Vec<(Signal, usize)> = Vec::new();
     for a in anomalies {
         match seen.iter_mut().find(|(s, _)| *s == a.signal) {
@@ -238,6 +242,52 @@ pub fn summary(score: &Score, context: &ContextAssessment, anomalies: &[WindowAn
         });
     }
     parts.join(" · ")
+}
+
+fn health_light(status: Status) -> &'static str {
+    match status {
+        Status::Healthy | Status::Good => "🟢",
+        Status::Watch => "🟡",
+        Status::Degraded => "🟠",
+        Status::ResetRecommended => "🔴",
+    }
+}
+
+/// Context light follows the penalty bands: green below 70 %, yellow 70–80 %,
+/// orange 80–90 %, red above 90 %; white when the limit is unknown.
+fn context_phrase(context: &ContextAssessment) -> String {
+    match (context.percent, context.prompt_tokens, context.limit) {
+        (Some(pct), Some(used), Some(limit)) => {
+            let light = match context.signal {
+                None => "🟢",
+                Some(Signal::Context70) => "🟡",
+                Some(Signal::Context80) => "🟠",
+                _ => "🔴",
+            };
+            format!(
+                "{light} context {pct:.0}% ({} / {} tokens)",
+                with_commas(used),
+                with_commas(limit)
+            )
+        }
+        (_, Some(used), None) => format!(
+            "⚪ context unknown ({} tokens, no limit for this model)",
+            with_commas(used)
+        ),
+        _ => "⚪ context unknown".to_string(),
+    }
+}
+
+fn with_commas(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -273,7 +323,7 @@ mod tests {
         assert_eq!(a.reasons[0].signal, "context_70");
         assert_eq!(
             summary(&a, &ctx, &anomalies),
-            "Context Guard 75 · good · context 78% · 1 known-value drift · 1 repeated operation"
+            "🟢 Context Guard 75 · good · 🟡 context 78% (7,820 / 10,000 tokens) · 1 known-value drift · 1 repeated operation"
         );
     }
 
@@ -288,6 +338,11 @@ mod tests {
         assert_eq!(s.health, 0);
         assert_eq!(s.risk, 100);
         assert_eq!(s.status, Status::ResetRecommended);
+        assert!(
+            summary(&s, &assess(Some(9500), Some(10_000)), &anomalies).starts_with(
+                "🔴 Context Guard 0 · reset recommended · 🔴 context 95% (9,500 / 10,000 tokens)"
+            )
+        );
     }
 
     #[test]
@@ -314,9 +369,12 @@ mod tests {
         );
         assert_eq!(s.health, 100);
         assert!(s.reasons.is_empty());
+        assert_eq!(summary(&s, &assess(Some(1234567), None), &[]), "🟢 Context Guard 100 · healthy · ⚪ context unknown (1,234,567 tokens, no limit for this model)");
+        assert_eq!(with_commas(999), "999");
+        assert_eq!(with_commas(1000), "1,000");
         assert_eq!(
             summary(&s, &assess(None, None), &[]),
-            "Context Guard 100 · healthy · context unknown"
+            "🟢 Context Guard 100 · healthy · ⚪ context unknown"
         );
     }
 }
