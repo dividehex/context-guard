@@ -51,6 +51,10 @@ class Filter:
             default=40,
             description="Also raise a toast notification when health drops below this value; 0 disables.",
         )
+        settle_seconds: float = Field(
+            default=1.5,
+            description="After a result arrives, wait this long and re-check once so a reply with tool or code-interpreter iterations shows its last iteration.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -125,7 +129,7 @@ class Filter:
             while True:
                 status, payload = await self._get(session, by_message)
                 if status == 200:
-                    return payload
+                    return await self._settle(session, by_message, payload)
                 if status == 404:
                     # Not scored yet (or, for a brand-new chat, not even known yet: LiteLLM flushes
                     # its batch up to a second after the reply). Keep polling. After the deadline,
@@ -139,6 +143,20 @@ class Filter:
                     await asyncio.sleep(max(0.05, self.valves.poll_interval))
                     continue
                 return None  # Context Guard unreachable or erroring: give up quietly
+
+    async def _settle(self, session, url, result):
+        """A reply that ran tools or the code interpreter is several model calls under one
+        message id, each scored as its own turn. Re-check a moment later (past LiteLLM's
+        flush interval) and keep the newest turn, up to three times."""
+        for _ in range(3):
+            if self.valves.settle_seconds <= 0:
+                break
+            await asyncio.sleep(self.valves.settle_seconds)
+            status, newer = await self._get(session, url)
+            if status != 200 or newer.get("turn") == result.get("turn"):
+                break
+            result = newer
+        return result
 
     @staticmethod
     async def _get(session: aiohttp.ClientSession, url: str):

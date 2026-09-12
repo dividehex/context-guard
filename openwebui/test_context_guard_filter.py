@@ -50,6 +50,7 @@ def stub():
 
 def make_filter(url, **valves):
     f = Filter()
+    valves = {"settle_seconds": 0.0, **valves}
     f.valves = Filter.Valves(context_guard_url=url, wait_seconds=1.0, poll_interval=0.05, connect_timeout=0.5, **valves)
     return f
 
@@ -96,6 +97,16 @@ def test_new_chat_unknown_then_scored(stub):
     run(f.outlet(dict(BODY), em, META))
     assert len(stub.requests) == 3
     assert em.events and em.events[0]["type"] == "status"
+
+
+def test_settles_on_the_latest_iteration(stub):
+    first = {"turn": 3, "score": 100, "status": "healthy", "summary": "first iteration"}
+    second = {"turn": 4, "score": 95, "status": "healthy", "summary": "second iteration"}
+    stub.responses["/api/v1/conversations/chat-1/health?message_id=msg-1"] = [(200, first), (200, second), (200, second)]
+    f, em = make_filter(stub.url, settle_seconds=0.05), Emitter()
+    run(f.outlet(dict(BODY), em, META))
+    assert em.events[0]["data"]["description"] == "second iteration"
+    assert len(stub.requests) == 3  # initial, settle (changed), settle (unchanged)
 
 
 def test_timestamp_fallback_after_deadline(stub):

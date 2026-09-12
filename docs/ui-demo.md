@@ -66,26 +66,20 @@ python3 -c "print('The quick brown fox jumps over the lazy dog near the river ba
 
 Paste the contents of `/tmp/filler.txt` followed by `Reply with the single word OK.`
 
-If the chat has the terminal tool enabled (model Function Calling set to
-Native), you can skip the paste and let the tool output carry the filler into
-the context instead:
+Instead of pasting, let Open WebUI's code interpreter (Pyodide) generate the
+filler inside the chat: turn on **Code Interpreter** in the chat input's
+integrations menu, then send:
 
 ```text
-Use the terminal to run exactly this command and include its complete output in your reply, then say OK:
-python3 -c "print('The quick brown fox jumps over the lazy dog near the river bank at dawn. ' * 550)"
+Use the code interpreter to run this Python exactly as written and show its full output, then say OK:
+print("The quick brown fox jumps over the lazy dog near the river bank at dawn. " * 550)
 ```
 
-The tool result becomes a `tool` message in the follow-up request, so that
-request's prompt tokens include the whole output and the status line shows the
-pressure.
-
-Expected: `🟢 Context Guard 95 · healthy · 🟡 context 77% (9,4xx/12,288)`
-
-The percentage in the status line tells you where you landed; if it is under
-70 %, paste a little more. Above 80 % turns the light orange (−10), above 90 %
-red (−20). Note that in the big-context chat above, Open WebUI's context
-compaction would rewrite the history long before 70 %, which is why this
-stage uses the small model.
+Open WebUI runs the code in the browser, appends the output to the reply, and
+calls the model again with the output in the context. That second call is
+the one that carries ~9,500 prompt tokens; the filter waits for it and shows
+its score, so the status line reads the same as with pasting. A terminal tool
+server works the same way, with its output arriving as a `tool` message.
 
 ## 8+. Tool signals (optional, needs a tool server)
 
