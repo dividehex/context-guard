@@ -173,11 +173,19 @@ pub fn detect_suspicious(claims: &[Identifier], registry: &[Identifier]) -> Vec<
     out
 }
 
+/// `word` is `stem` with an English plural ending: prose about "the
+/// auto-respawns" names the known `auto-respawn`, it does not invent a new one.
+fn is_plural_of(word: &str, stem: &str) -> bool {
+    word.strip_suffix("es")
+        .or_else(|| word.strip_suffix('s'))
+        .is_some_and(|w| w == stem)
+}
+
 fn is_similar(a: &str, b: &str, allow_prefix: bool) -> bool {
     let a = a.to_ascii_lowercase();
     let b = b.to_ascii_lowercase();
     let longer = a.chars().count().max(b.chars().count());
-    if longer == 0 {
+    if longer == 0 || is_plural_of(&a, &b) || is_plural_of(&b, &a) {
         return false;
     }
     let one_extends_other = a.starts_with(&b) || b.starts_with(&a);
@@ -232,6 +240,28 @@ mod tests {
         assert!(detect_suspicious(&extract("use qwen3-general", &[]), &registry).is_empty());
         // Unrelated name: nothing.
         assert!(detect_suspicious(&extract("use mistral-small", &[]), &registry).is_empty());
+    }
+
+    #[test]
+    fn plurals_of_known_names_are_not_suspicious() {
+        let registry = vec![Identifier {
+            kind: IdKind::Name,
+            value: "auto-respawn".into(),
+        }];
+        let plural = vec![Identifier {
+            kind: IdKind::Name,
+            value: "auto-respawns".into(),
+        }];
+        assert!(detect_suspicious(&plural, &registry).is_empty());
+        let typo = vec![Identifier {
+            kind: IdKind::Name,
+            value: "auto-respwan".into(),
+        }];
+        assert_eq!(
+            detect_suspicious(&typo, &registry).len(),
+            1,
+            "a real near-miss still fires"
+        );
     }
 
     #[test]

@@ -20,6 +20,19 @@ pub enum Signal {
 }
 
 impl Signal {
+    /// Every signal, for catalogs and exhaustive tests.
+    pub const ALL: [Signal; 9] = [
+        Signal::Context70,
+        Signal::Context80,
+        Signal::Context90,
+        Signal::RepeatedToolCall,
+        Signal::ResponseLoop,
+        Signal::KnownValueDrift,
+        Signal::ToolResultWithoutCall,
+        Signal::ToolCallIdReferenceUnknown,
+        Signal::SuspiciousIdentifier,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Signal::Context70 => "context_70",
@@ -83,6 +96,50 @@ impl Signal {
         }
     }
 
+    /// Title for the explanation page.
+    pub fn title(self) -> &'static str {
+        match self {
+            Signal::Context70 => "Context pressure: 70 to 80 percent full",
+            Signal::Context80 => "Context pressure: 80 to 90 percent full",
+            Signal::Context90 => "Context pressure: above 90 percent, or overflow",
+            Signal::RepeatedToolCall => "Repeated tool call",
+            Signal::ResponseLoop => "Response loop",
+            Signal::KnownValueDrift => "Known-value drift",
+            Signal::ToolResultWithoutCall => "Tool result without a call",
+            Signal::ToolCallIdReferenceUnknown => "Reference to a tool call that never happened",
+            Signal::SuspiciousIdentifier => "Suspicious identifier",
+        }
+    }
+
+    /// What the signal detects, why it matters, and what to do about it.
+    /// Numbers that live in configuration (penalties) are deliberately absent;
+    /// the API reports them next to this text.
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Signal::Context70 | Signal::Context80 | Signal::Context90 => {
+                "The latest request filled this much of the model's context window, measured from the prompt token count the backend reported against the window declared for the model. As the window fills, the model has less room to reason, and older details are the first to be compacted away or overlooked. In the lowest band, plan to wrap up the thread of work. In the middle band, start a new conversation for anything new. Above ninety percent the next request may be rejected or silently truncated; a request the backend refused for exceeding the window is reported in this band as an overflow, with the size the backend saw."
+            }
+            Signal::RepeatedToolCall => {
+                "The assistant called the same tool with identical arguments three times within its last five calls. Argument key order and whitespace are ignored, so cosmetic differences do not hide a repeat. Repeating an operation that already ran usually means the model lost track of the earlier result or is stuck in a retry loop; it burns context, and for a tool with side effects it repeats the side effect. Check whether the results differed. In agentic sessions a few legitimate repeats do happen, for example re-running a status command, which is why the penalty is small."
+            }
+            Signal::ResponseLoop => {
+                "The reply is almost identical to at least two of the previous three replies: ninety percent or more of its word triples overlap, for replies of at least twenty words. The model is repeating itself instead of making progress, the classic shape of a stuck conversation. Change what you ask, supply the information it keeps missing, or start fresh."
+            }
+            Signal::KnownValueDrift => {
+                "The assistant stated a different value for something the conversation had established unambiguously: a port, IP address, version, environment variable or setting that appeared exactly once in user or tool messages, with its marker and the thing it belongs to, and the value the assistant used never appeared in any user or tool message. This is the most direct evidence that the model's picture of the facts has diverged from the record. Correct it explicitly, and re-check anything it produced from the wrong value."
+            }
+            Signal::ToolResultWithoutCall => {
+                "A tool result arrived whose call id was never issued by an assistant message in the same request. Either the client or a proxy rewrote the history, or the conversation was edited and the pairing broke. The model is being shown the result of a call it did not make, which corrupts its understanding of what happened. Counted once per call id."
+            }
+            Signal::ToolCallIdReferenceUnknown => {
+                "The assistant referred to a tool-call id shaped like the conversation's real ids, with the same prefix or the same length and alphabet, that was never issued. The model is inventing tool history, which usually comes just before invented results. Treat its claims about earlier tool output with suspicion and restate what actually ran."
+            }
+            Signal::SuspiciousIdentifier => {
+                "The reply introduced a name that closely resembles one the conversation already uses but is not it: a model, container, host, tool or name within about twenty percent edit distance, or extended by a prefix of at least six shared characters; paths and environment variables by edit distance only. Near-duplicates are how an invented name slips in, such as a v2 suffix on a model that has no v2. Check the name before acting on it."
+            }
+        }
+    }
+
     /// Bucket used by the API's `signals` counts and by Prometheus.
     pub fn family(self) -> SignalFamily {
         match self {
@@ -104,6 +161,18 @@ pub enum SignalFamily {
     KnownValueDrift,
     ToolAnomaly,
     SuspiciousIdentifier,
+}
+
+impl SignalFamily {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SignalFamily::Context => "context",
+            SignalFamily::Loop => "loop",
+            SignalFamily::KnownValueDrift => "known_value_drift",
+            SignalFamily::ToolAnomaly => "tool_anomaly",
+            SignalFamily::SuspiciousIdentifier => "suspicious_identifier",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -337,6 +406,18 @@ fn with_commas(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_signal_is_cataloged_with_text() {
+        for s in Signal::ALL {
+            assert_eq!(Signal::parse(s.as_str()), Some(s));
+            assert!(!s.title().is_empty());
+            assert!(s.explanation().len() > 100, "{}", s.as_str());
+        }
+        let names: std::collections::HashSet<&str> =
+            Signal::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(names.len(), Signal::ALL.len());
+    }
     use crate::monitor::context::assess;
 
     fn anomaly(signal: Signal, penalty: u32, turn: u32) -> WindowAnomaly {

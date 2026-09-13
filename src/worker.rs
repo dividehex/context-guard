@@ -9,9 +9,30 @@ use tokio::sync::mpsc::Receiver;
 use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::monitor::{Monitor, Outcome};
+use crate::telemetry::claude_code;
+use crate::telemetry::event::ConversationEvent;
 use crate::telemetry::litellm;
 
-pub type Batch = Vec<Value>;
+/// One accepted ingest body, tagged with the source whose normalizer reads it.
+#[derive(Debug)]
+pub enum Batch {
+    LiteLlm(Vec<Value>),
+    ClaudeCode(claude_code::Ingest),
+}
+
+impl Batch {
+    /// Number of raw items in the body, for metrics and the ingest response.
+    pub fn len(&self) -> usize {
+        match self {
+            Batch::LiteLlm(items) => items.len(),
+            Batch::ClaudeCode(ingest) => ingest.records.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 pub async fn run(
     mut rx: Receiver<Batch>,
@@ -21,27 +42,12 @@ pub async fn run(
 ) {
     while let Some(batch) = rx.recv().await {
         metrics.queue_depth.set(rx.len() as i64);
-        let mut events = Vec::with_capacity(batch.len());
-        for value in &batch {
-            match litellm::normalize(value, &config) {
-                Ok(event) => events.push(event),
-                Err(litellm::NormalizeError::UnsupportedCallType(t)) => {
-                    tracing::debug!(call_type = %t, "ignoring non-chat payload");
-                    metrics
-                        .events_dropped
-                        .with_label_values(&["unsupported"])
-                        .inc();
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "malformed payload rejected");
-                    metrics
-                        .events_dropped
-                        .with_label_values(&["malformed"])
-                        .inc();
-                }
-            }
+        let mut events = normalize(&batch, &config, &metrics);
+        // Transcript slices are already in file order and must stay that way:
+        // the delta of each completion depends on the one before it.
+        if matches!(batch, Batch::LiteLlm(_)) {
+            events.sort_by_key(|e| e.started_at);
         }
-        events.sort_by_key(|e| e.started_at);
         for event in &events {
             metrics
                 .events_received
@@ -72,4 +78,46 @@ pub async fn run(
         }
     }
     tracing::info!("ingest queue closed; worker exiting");
+}
+
+fn normalize(batch: &Batch, config: &Config, metrics: &Metrics) -> Vec<ConversationEvent> {
+    match batch {
+        Batch::LiteLlm(items) => {
+            let mut events = Vec::with_capacity(items.len());
+            for value in items {
+                match litellm::normalize(value, config) {
+                    Ok(event) => events.push(event),
+                    Err(litellm::NormalizeError::UnsupportedCallType(t)) => {
+                        tracing::debug!(call_type = %t, "ignoring non-chat payload");
+                        metrics
+                            .events_dropped
+                            .with_label_values(&["unsupported"])
+                            .inc();
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "malformed payload rejected");
+                        metrics
+                            .events_dropped
+                            .with_label_values(&["malformed"])
+                            .inc();
+                    }
+                }
+            }
+            events
+        }
+        Batch::ClaudeCode(ingest) => {
+            let normalized = claude_code::normalize(ingest, config);
+            if normalized.malformed > 0 {
+                tracing::warn!(
+                    count = normalized.malformed,
+                    "malformed transcript records skipped"
+                );
+                metrics
+                    .events_dropped
+                    .with_label_values(&["malformed"])
+                    .inc_by(normalized.malformed as u64);
+            }
+            normalized.events
+        }
+    }
 }

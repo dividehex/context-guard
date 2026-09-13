@@ -8,10 +8,12 @@ the same change.
 ## What this is
 
 A deterministic, out-of-band health monitor for LLM conversations. One Rust
-binary (axum + tokio + sqlx/SQLite) ingests LiteLLM `generic_api` batches,
-scores each chat turn 0..100 with explicit reasons, and serves the result to an
-Open WebUI filter (`openwebui/context_guard_filter.py`) that renders a UI-only
-status line. Verified against LiteLLM v1.94.1 and Open WebUI v0.11.3.
+binary (axum + tokio + sqlx/SQLite) ingests LiteLLM `generic_api` batches and
+Claude Code transcript slices, scores each chat turn 0..100 with explicit
+reasons, and serves the result to an Open WebUI filter
+(`openwebui/context_guard_filter.py`) and a Claude Code status line
+(`claude-code/context_guard_statusline.py`), both UI-only. Verified against
+LiteLLM v1.94.1, Open WebUI v0.11.3 and Claude Code 2.1.270.
 
 ## Invariants (do not break these)
 
@@ -39,15 +41,20 @@ status line. Verified against LiteLLM v1.94.1 and Open WebUI v0.11.3.
 ## Layout and data flow
 
 ```
-POST /api/v1/ingest/litellm  (src/api/ingest.rs)
-  -> bounded mpsc queue of raw JSON batches (Batch = Vec<Value>)
-  -> src/worker.rs (single consumer, sorts by startTime)
-  -> src/telemetry/litellm.rs  normalize() -> ConversationEvent
-     src/telemetry/identity.rs  conversation id precedence: chat tag > trace_id (opt-in) > fallback hash
+POST /api/v1/ingest/litellm      (src/api/ingest.rs)
+POST /api/v1/ingest/claude-code  (same file; body from claude-code/context_guard_hook.py)
+  -> bounded mpsc queue of raw batches (worker::Batch, an enum tagged by source)
+  -> src/worker.rs (single consumer; LiteLLM batches sorted by startTime, transcript slices kept in file order)
+  -> src/telemetry/litellm.rs      normalize() -> ConversationEvent (full messages[]; the monitor computes the delta)
+     src/telemetry/claude_code.rs  normalize() -> ConversationEvent per requestId group (messages_are_delta = true)
+     src/telemetry/identity.rs     conversation id precedence: chat tag > trace_id (opt-in) > fallback hash; Claude Code uses the session id
   -> src/monitor/mod.rs  Monitor::process(): dedupe by event id, compute the message delta,
      run signals, persist anomalies, score the window, store health, update metrics
   -> src/database/repo.rs  every SQL statement lives here (runtime sqlx queries, FromRow structs)
 GET /api/v1/conversations/...  (src/api/conversations.rs) read the stored results
+GET /api/v1/conversations/{id}/explain  (src/api/explain.rs) the front-end document: reasons, issues, history, explanations
+GET /api/v1/signals            (src/api/signals.rs) catalog with configured penalties; `describe()` is shared with explain
+GET /ui/conversations/{id}     (src/api/ui.rs) ui/conversation.html via include_str!, renders the explain JSON client-side
 ```
 
 - `src/monitor/{context,known_values,identifiers,repetition,tools,text}.rs`
@@ -59,12 +66,18 @@ GET /api/v1/conversations/...  (src/api/conversations.rs) read the stored result
   parse-and-reject test; keep that.
 - `src/metrics.rs` is the Prometheus registry; signal counters are keyed by
   `Signal::family()`.
+- `ui/conversation.html` must stay self-contained: no external scripts,
+  styles or fonts (a test asserts no `http://` in it). It is a reference
+  renderer of the explain JSON; the JSON is the contract for other front ends.
+  The Dockerfile copies `ui/` because `include_str!` needs it at build time.
 - `migrations/` is applied by `sqlx::migrate!` at startup. Never edit
-  `0001_initial.sql`; add `000N_<name>.sql`. Foreign keys cascade from
+  `0001_initial.sql`; add `000N_<name>.sql` (`0002_prompts.sql` added the
+  prompt counters and backfilled them from turns). Foreign keys cascade from
   `conversations`, so retention only deletes conversations.
-- `openwebui/` filter + pytest; `scripts/e2e_degradation.py` live-stack test;
-  `docs/ui-demo.md` the manual walkthrough (its expected scores are asserted
-  by the e2e script, keep them consistent).
+- `openwebui/` filter + pytest; `claude-code/` hook + status line + pytest
+  (stdlib only, keep it that way); `scripts/e2e_degradation.py` live-stack
+  test; `docs/ui-demo.md` the manual walkthrough (its expected scores are
+  asserted by the e2e script, keep them consistent).
 
 ## How scoring state works (non-obvious)
 
@@ -74,21 +87,38 @@ GET /api/v1/conversations/...  (src/api/conversations.rs) read the stored result
   `context_overflow_tokens`).
 - The monitor never trusts `messages[]` for turn counts or facts (Open WebUI
   compaction rewrites it). It hashes the previous request's message list; if
-  the new list extends it, only the **delta** is examined for new facts.
+  the new list extends it, only the **delta** is examined for new facts. An
+  event with `messages_are_delta` (Claude Code) carries only the delta and
+  skips that comparison; the delta opens with the previous reply so the
+  orphan-result check still sees the calls the results answer.
+- Claude Code specifics live in `telemetry/claude_code.rs` only: a turn is a
+  `requestId` group, prompt tokens are input + cache_read + cache_creation,
+  compaction summaries are `system`, side chains are skipped, `isApiErrorMessage`
+  records are failures. The hook resends from the start of the last shipped
+  completion, so overlapping batches are normal and dedupe handles them; on
+  `PostToolUse` it holds back the reply still streaming, because the first
+  ship of a `requestId` is the one that sticks (dedupe never extends an event).
+  Tool results can be interleaved with the blocks of one response; the
+  normalizer defers them to the next request instead of splitting the turn.
 - Known values and identifiers are learned only from `user` and `tool`
   messages; `assistant` text is a claim; `system` is ignored.
 - Anomalies are deduplicated per conversation by `dedupe_key`
   (`UNIQUE(conversation_id, dedupe_key)`); design the key so a persistent
   condition fires once, not every turn.
-- Risk sums the anomalies recorded in the last `window_turns` turns, so a
-  chat recovers when the behaviour stops.
+- Risk sums the anomalies recorded in the last `window_turns` **prompts**, so
+  a chat recovers when the behaviour stops. `turn` numbers completions;
+  `prompt` advances when an event has `starts_prompt` (LiteLLM: always, so
+  prompt == turn; Claude Code: the delta carries a `user` message). Anomalies
+  and health rows store both; the window query filters on `prompt`.
 - Events are deduplicated by LiteLLM's payload `id`; redelivery is harmless.
 
 ## Adding or changing a signal (checklist)
 
 1. Pure detection function + unit tests in the right `monitor/` submodule.
-2. `Signal` variant in `scoring.rs`: `as_str`, `parse`, `severity`, `phrase`,
-   `short` (fits the one-line Open WebUI status), `family`.
+2. `Signal` variant in `scoring.rs`: `ALL`, `as_str`, `parse`, `severity`,
+   `phrase`, `short` (fits the one-line Open WebUI status), `title`,
+   `explanation` (what it detects, why it matters, what to do; no configured
+   numbers in the text), `family`.
 3. `Penalties` field, `Default`, and `for_signal` in `config.rs`.
 4. Wire it in `Monitor::process` with a `Finding` and a sensible `dedupe_key`.
 5. `config/context-guard.example.toml`, the README signal table, and if the
@@ -104,7 +134,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets            # unit + integration; tests/binary.rs spawns the real binary
 cargo audit                         # RustSec advisories for Cargo.lock; ignores live in .cargo/audit.toml with a reason each
-python -m pytest -q openwebui/      # needs aiohttp, pydantic, pytest
+python -m pytest -q openwebui/ claude-code/   # openwebui needs aiohttp, pydantic, pytest; claude-code only pytest
 docker build -t context-guard .     # multi-stage, runs as uid 10001, `context-guard healthcheck` subcommand
 scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model>   # live stack only
 ```
@@ -124,8 +154,11 @@ Testing conventions:
   `assistant()`, `tool_call()` and `wait_for_message` / `wait_for_turns`
   rather than hand-rolling payloads. `harness_without_worker` exists for
   back-pressure tests.
-- `tests/fixtures/*.json` are **real captured** LiteLLM v1.94.1 batches. Do not
-  hand-edit them; capture new ones with `CONTEXT_GUARD_CAPTURE_DIR`.
+- `tests/fixtures/*.json` are **real captured** bodies: LiteLLM v1.94.1
+  batches and what the Claude Code hook shipped for a headless `claude -p`
+  session. Do not hand-edit them; capture new ones with
+  `CONTEXT_GUARD_CAPTURE_DIR` (for Claude Code: run the binary with it set,
+  then run the hook with a hand-written hook event on stdin).
 - Tests run in parallel; never bind fixed ports or share DB paths.
 
 ## Conventions

@@ -101,6 +101,8 @@ pub async fn health(
         "status": result.status,
         "turns": conversation.turns,
         "turn": result.turn,
+        "prompts": conversation.prompts,
+        "prompt": result.prompt,
         "message_id": result.message_id,
         "ts": result.ts,
         "context": ContextView { prompt_tokens: result.prompt_tokens, limit: result.context_limit, percent: result.context_percent },
@@ -147,6 +149,7 @@ pub async fn history(
 fn health_view(r: &HealthRow) -> Value {
     json!({
         "turn": r.turn,
+        "prompt": r.prompt,
         "ts": r.ts,
         "message_id": r.message_id,
         "score": r.health,
@@ -161,6 +164,7 @@ fn health_view(r: &HealthRow) -> Value {
 fn anomaly_view(a: &AnomalyRow) -> Value {
     json!({
         "turn": a.turn,
+        "prompt": a.prompt,
         "ts": a.ts,
         "signal": a.signal,
         "penalty": a.penalty,

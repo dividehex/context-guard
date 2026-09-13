@@ -11,6 +11,7 @@ RUN mkdir -p src && echo 'fn main() {}' > src/main.rs && echo '' > src/lib.rs \
     && cargo build --release --locked 2>/dev/null || true
 
 COPY migrations ./migrations
+COPY ui ./ui
 COPY src ./src
 RUN touch src/main.rs src/lib.rs && cargo build --release --locked --bin context-guard
 

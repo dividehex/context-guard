@@ -20,6 +20,7 @@ good = 75
 watch = 60
 degraded = 40
 
-[model_limits]                       # context limits by LiteLLM model name (overrides the payload's max_input_tokens)
-# "qwen3-30b-a3b" = 122880
+[model_limits]                       # context limits by model name; overrides LiteLLM's max_input_tokens
+# "qwen3-30b-a3b" = 122880          # and the window the Claude Code status line reports
 # "fury/qwen3-8b" = 12288
+# "claude-opus-4-8" = 200000

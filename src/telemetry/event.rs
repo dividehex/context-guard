@@ -83,6 +83,8 @@ impl EventKind {
 pub enum IdSource {
     ChatTag,
     TraceId,
+    /// The Claude Code session id, which names the transcript file.
+    Session,
     Fallback,
 }
 
@@ -91,6 +93,7 @@ impl IdSource {
         match self {
             IdSource::ChatTag => "chat_tag",
             IdSource::TraceId => "trace_id",
+            IdSource::Session => "session",
             IdSource::Fallback => "fallback",
         }
     }
@@ -114,7 +117,15 @@ pub struct ConversationEvent {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub context_limit: Option<u64>,
+    /// The request as the model saw it (LiteLLM), or, when `messages_are_delta`
+    /// is set, only the messages added since this conversation's previous
+    /// completion (Claude Code transcripts, which are shipped incrementally).
     pub messages: Vec<Message>,
+    pub messages_are_delta: bool,
+    /// This completion begins a new prompt, the unit the anomaly window is
+    /// counted in. LiteLLM: every completion. Claude Code: a completion whose
+    /// delta carries a user message, so a tool loop is one prompt.
+    pub starts_prompt: bool,
     pub response_text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub tool_results: Vec<ToolResult>,

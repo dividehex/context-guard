@@ -96,12 +96,18 @@ impl Monitor {
             .await?
             .ok_or_else(|| anyhow::anyhow!("conversation vanished after upsert"))?;
         let turn = u32::try_from(conversation.turns).unwrap_or(0) + 1;
+        // The anomaly window is counted in prompts; the source says when one begins.
+        let prompt =
+            u32::try_from(conversation.prompts).unwrap_or(0) + u32::from(event.starts_prompt);
         let cid = event.conversation_id.as_str();
 
-        // Messages not seen in the previous request of this conversation.
+        // Messages not seen in the previous request of this conversation. A
+        // source that ships increments says so; otherwise the previous request
+        // must be a prefix of this one for anything to count as already seen.
         let hashes: Vec<String> = event.messages.iter().map(message_hash).collect();
         let prev_count = usize::try_from(conversation.last_messages_count).unwrap_or(0);
-        let prefix_matches = prev_count <= hashes.len()
+        let prefix_matches = !event.messages_are_delta
+            && prev_count <= hashes.len()
             && conversation.last_messages_hash.as_deref()
                 == Some(&sha256_hex(&hashes[..prev_count].join("\n")));
         let delta: &[Message] = if prefix_matches {
@@ -153,6 +159,7 @@ impl Monitor {
                 .insert_anomaly(NewAnomaly {
                     conversation_id: cid,
                     turn,
+                    prompt,
                     ts: event.timestamp,
                     signal: f.signal.as_str(),
                     penalty: self.config.penalties.for_signal(f.signal),
@@ -167,10 +174,11 @@ impl Monitor {
             }
         }
 
-        let window_start = turn.saturating_sub(self.config.scoring.window_turns.saturating_sub(1));
+        let window_start =
+            prompt.saturating_sub(self.config.scoring.window_turns.saturating_sub(1));
         let window: Vec<WindowAnomaly> = self
             .db
-            .anomalies_since_turn(cid, window_start)
+            .anomalies_since_prompt(cid, window_start)
             .await?
             .into_iter()
             .filter_map(|row| {
@@ -197,6 +205,7 @@ impl Monitor {
             .insert_health(NewHealth {
                 conversation_id: cid,
                 turn,
+                prompt,
                 ts: event.timestamp,
                 message_id: event.message_id.as_deref(),
                 health: score.health,
@@ -213,6 +222,7 @@ impl Monitor {
             .update_conversation_turn(TurnUpdate {
                 conversation_id: cid,
                 turns: turn,
+                prompts: prompt,
                 health: score.health,
                 risk: score.risk,
                 status: score.status.as_str(),
@@ -523,12 +533,12 @@ impl Monitor {
 fn context_overflow_tokens(error: Option<&str>) -> Option<Option<u64>> {
     use std::sync::LazyLock;
     static OVERFLOW_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"(?i)ContextWindowExceeded|context_length_exceeded|exceed_context_size|exceeds? the (?:available )?context|maximum context length|context window")
+        regex::Regex::new(r"(?i)ContextWindowExceeded|context_length_exceeded|exceed_context_size|exceeds? the (?:available )?context|maximum context length|context window|prompt is too long")
             .unwrap()
     });
     static TOKENS_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(
-            r"(?i)request \((\d+) tokens\)|n_prompt_tokens'?\s*[:=]\s*(\d+)|requested (\d+) tokens",
+            r"(?i)request \((\d+) tokens\)|n_prompt_tokens'?\s*[:=]\s*(\d+)|requested (\d+) tokens|too long: (\d+) tokens",
         )
         .unwrap()
     });
@@ -538,7 +548,7 @@ fn context_overflow_tokens(error: Option<&str>) -> Option<Option<u64>> {
     }
     let tokens = TOKENS_RE
         .captures(error)
-        .and_then(|c| (1..=3).find_map(|i| c.get(i)))
+        .and_then(|c| (1..=4).find_map(|i| c.get(i)))
         .and_then(|m| m.as_str().parse::<u64>().ok());
     Some(tokens)
 }
@@ -576,6 +586,13 @@ mod tests {
         assert_eq!(
             context_overflow_tokens(Some("This model's maximum context length is 8192 tokens")),
             Some(None)
+        );
+        // Anthropic's wording, as Claude Code records it.
+        assert_eq!(
+            context_overflow_tokens(Some(
+                "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 213265 tokens > 200000 maximum\"}}"
+            )),
+            Some(Some(213_265))
         );
         assert_eq!(context_overflow_tokens(Some("connection refused")), None);
         assert_eq!(context_overflow_tokens(None), None);

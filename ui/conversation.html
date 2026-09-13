@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context Guard</title>
+<style>
+  :root {
+    --ground: #f5f7f6; --panel: #ffffff; --panel-2: #eef2f1;
+    --ink: #1b2226; --ink-2: #4a565c; --ink-3: #7a878d;
+    --line: #d5dcdb; --line-2: #e6ebea;
+    --accent: #1f6f7f; --accent-soft: #dcecef;
+    --ok: #2f8a4f; --warn: #b8860b; --bad: #b5372f; --unknown: #8a949a;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #13191b; --panel: #1a2224; --panel-2: #212b2e;
+      --ink: #e4eaea; --ink-2: #a8b5b8; --ink-3: #74838a;
+      --line: #2d393d; --line-2: #253034;
+      --accent: #5fb3c4; --accent-soft: #1d3339;
+      --ok: #5fc47f; --warn: #d9a83a; --bad: #e0685f; --unknown: #74838a;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    font-size: 15px; line-height: 1.5; padding-block: 0 64px; padding-inline: 20px;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  header { padding-block: 28px 18px; border-bottom: 1px solid var(--line); display: grid; gap: 6px; }
+  .eyebrow { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  h1 { margin: 0; font-size: 26px; line-height: 1.15; font-weight: 650; text-wrap: balance; }
+  h2 { margin: 28px 0 10px; font-size: 18px; font-weight: 650; }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .muted { color: var(--ink-3); }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9em; background: var(--panel-2); border-radius: 3px; padding: 1px 5px; }
+
+  .hero { display: grid; grid-template-columns: auto 1fr; gap: 20px; align-items: center; padding: 20px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 6px; margin-top: 20px; }
+  .score { font-size: 56px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .score small { display: block; font-size: 12px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); margin-top: 6px; }
+  .status { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+  .light { width: 12px; height: 12px; border-radius: 50%; background: var(--unknown); display: inline-block; }
+  .light.ok { background: var(--ok); } .light.warn { background: var(--warn); } .light.bad { background: var(--bad); }
+  .summary { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: var(--ink-2); margin-top: 6px; overflow-wrap: anywhere; }
+  .meter { margin-top: 12px; }
+  .meter .bar { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+  .meter .fill { height: 100%; width: 0; background: var(--ok); }
+  .meter .fill.warn { background: var(--warn); } .meter .fill.bad { background: var(--bad); }
+  .meter .label { font-size: 13px; color: var(--ink-2); margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+  .formula { font-size: 14px; color: var(--ink-2); max-width: 70ch; }
+  .reasons { display: grid; gap: 8px; }
+  .reason { display: grid; grid-template-columns: 56px 1fr; gap: 12px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 4px; }
+  .penalty { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--bad); }
+  .reason .what { font-weight: 600; }
+  .reason .detail { color: var(--ink-2); font-size: 14px; }
+  .empty { color: var(--ink-3); font-style: italic; }
+
+  .issues { display: grid; gap: 12px; }
+  .issue { background: var(--panel); border: 1px solid var(--line-2); border-left: 3px solid var(--unknown); border-radius: 4px; padding: 12px 14px; display: grid; gap: 6px; }
+  .issue.low { border-left-color: var(--warn); } .issue.medium { border-left-color: var(--warn); } .issue.high { border-left-color: var(--bad); }
+  .issue.expired { opacity: 0.7; }
+  .issue .head { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; }
+  .issue .title { font-weight: 650; }
+  .chip { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 7px; border-radius: 3px; background: var(--panel-2); color: var(--ink-2); }
+  .chip.counting { background: var(--accent-soft); color: var(--accent); }
+  .issue .detail { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: var(--ink); background: var(--panel-2); padding: 6px 10px; border-radius: 3px; overflow-wrap: anywhere; }
+  .issue .explain { font-size: 14px; color: var(--ink-2); max-width: 78ch; }
+  details summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+
+  .chart { background: var(--panel); border: 1px solid var(--line-2); border-radius: 4px; padding: 12px; overflow-x: auto; }
+  svg text { fill: var(--ink-3); font-size: 11px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  footer { margin-top: 36px; font-size: 13px; color: var(--ink-3); }
+  footer a { color: var(--accent); }
+  @media (max-width: 560px) { .hero { grid-template-columns: 1fr; } .reason { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow"><span>Context Guard</span><span id="model"></span><span id="turns"></span><span id="seen"></span></div>
+    <h1 id="title">Loading…</h1>
+    <div class="mono muted" id="cid"></div>
+  </header>
+  <main id="main" hidden>
+    <section class="hero">
+      <div class="score"><span id="score">–</span><small>health</small></div>
+      <div>
+        <div class="status"><span class="light" id="light"></span><span id="status"></span></div>
+        <div class="summary" id="summary"></div>
+        <div class="meter"><div class="bar"><div class="fill" id="ctx-fill"></div></div><div class="label" id="ctx-label"></div></div>
+      </div>
+    </section>
+
+    <h2>Why this score</h2>
+    <p class="formula" id="formula"></p>
+    <div class="reasons" id="reasons"></div>
+
+    <h2>Issues caught</h2>
+    <div class="issues" id="issues"></div>
+
+    <h2>Health over turns</h2>
+    <div class="chart" id="chart"></div>
+  </main>
+  <p id="error" class="empty" hidden></p>
+  <footer>Data: <a id="json" href="#">the explain endpoint</a> · a front end may render this JSON any way it likes.</footer>
+</div>
+<script>
+(function () {
+  var id = decodeURIComponent(location.pathname.split('/').pop());
+  var api = '/api/v1/conversations/' + encodeURIComponent(id) + '/explain';
+  document.getElementById('json').href = api;
+  document.getElementById('cid').textContent = id;
+
+  function $(sel) { return document.getElementById(sel); }
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function lightFor(status) { return {healthy: 'ok', good: 'ok', watch: 'warn', degraded: 'warn', reset_recommended: 'bad'}[status] || ''; }
+  function statusLabel(s) { return (s || 'unknown').replace(/_/g, ' '); }
+  function fmt(n) { return n == null ? '?' : Number(n).toLocaleString(); }
+  function when(ts) { try { return new Date(ts).toLocaleString(); } catch (e) { return ts; } }
+
+  fetch(api).then(function (r) { return r.json().then(function (j) { return [r.status, j]; }); }).then(function (pair) {
+    var status = pair[0], d = pair[1];
+    if (status !== 200) {
+      var msg = (d && d.error && d.error.code === 'not_scored_yet') ? 'This conversation has no score yet.' : 'No such conversation.';
+      $('title').textContent = 'Nothing to show';
+      $('error').textContent = msg; $('error').hidden = false;
+      return;
+    }
+    document.title = 'Context Guard ' + d.score + ' · ' + statusLabel(d.status);
+    $('title').textContent = 'Context Guard ' + d.score + ' · ' + statusLabel(d.status);
+    $('model').textContent = d.model || '';
+    $('turns').textContent = d.turns + ' turn' + (d.turns === 1 ? '' : 's');
+    $('seen').textContent = 'last ' + when(d.last_seen);
+    $('score').textContent = d.score;
+    $('light').className = 'light ' + lightFor(d.status);
+    $('status').textContent = statusLabel(d.status) + ' · risk ' + d.risk;
+    $('summary').textContent = d.summary || '';
+
+    var ctx = d.context || {};
+    var fill = $('ctx-fill');
+    if (ctx.percent != null) {
+      var p = Math.min(100, Math.max(0, ctx.percent));
+      fill.style.width = p + '%';
+      fill.className = 'fill ' + (p >= 90 ? 'bad' : p >= 70 ? 'warn' : '');
+      $('ctx-label').textContent = 'context ' + p.toFixed(1) + '% · ' + fmt(ctx.prompt_tokens) + ' of ' + fmt(ctx.limit) + ' tokens';
+    } else {
+      $('ctx-label').textContent = 'context: ' + fmt(ctx.prompt_tokens) + ' tokens, limit unknown';
+    }
+
+    var sc = d.scoring || {};
+    $('formula').textContent = 'Health is 100 minus risk. Risk adds the context penalty of the latest request to the penalty of every issue recorded in the last ' + sc.window_turns + ' turns (turn ' + sc.window_from_turn + ' onward), capped at 100. Issues older than the window stop counting, so the score recovers when the behaviour stops.';
+
+    var reasons = $('reasons');
+    if (!d.reasons || !d.reasons.length) reasons.appendChild(el('p', 'empty', 'Nothing is counting against this conversation right now.'));
+    (d.reasons || []).forEach(function (r) {
+      var row = el('div', 'reason');
+      row.appendChild(el('div', 'penalty', '−' + r.penalty));
+      var body = el('div');
+      body.appendChild(el('div', 'what', r.title || r.signal));
+      body.appendChild(el('div', 'detail', r.detail || ''));
+      row.appendChild(body);
+      reasons.appendChild(row);
+    });
+
+    var issues = $('issues');
+    if (!d.issues || !d.issues.length) issues.appendChild(el('p', 'empty', 'No issues have been caught in this conversation.'));
+    (d.issues || []).slice().reverse().forEach(function (i) {
+      var card = el('div', 'issue ' + (i.severity || '') + (i.counting ? '' : ' expired'));
+      var head = el('div', 'head');
+      head.appendChild(el('span', 'title', i.title || i.signal));
+      head.appendChild(el('span', 'penalty', '−' + i.penalty));
+      head.appendChild(el('span', 'chip', (i.severity || '') + ' severity'));
+      head.appendChild(el('span', 'chip' + (i.counting ? ' counting' : ''), i.counting ? 'counting now' : 'outside the window'));
+      head.appendChild(el('span', 'muted', 'turn ' + i.turn + ' · ' + when(i.ts)));
+      card.appendChild(head);
+      if (i.detail) card.appendChild(el('div', 'detail', i.detail));
+      var det = document.createElement('details');
+      if (i.counting) det.open = true;
+      det.appendChild(el('summary', null, 'What this means and what to do'));
+      det.appendChild(el('p', 'explain', i.explanation || ''));
+      card.appendChild(det);
+      issues.appendChild(card);
+    });
+
+    var h = d.history || [];
+    var chart = $('chart');
+    if (!h.length) { chart.appendChild(el('p', 'empty', 'No turns yet.')); return; }
+    var w = Math.max(320, Math.min(880, h.length * 14 + 40)), hh = 140, pad = 28, bw = Math.max(2, (w - pad - 8) / h.length - 2);
+    var ns = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + hh); svg.setAttribute('width', w); svg.setAttribute('height', hh);
+    [0, 50, 100].forEach(function (v) {
+      var y = 10 + (100 - v);
+      var line = document.createElementNS(ns, 'line');
+      line.setAttribute('x1', pad); line.setAttribute('x2', w - 4); line.setAttribute('y1', y); line.setAttribute('y2', y);
+      line.setAttribute('stroke', 'currentColor'); line.setAttribute('stroke-opacity', '0.12');
+      svg.appendChild(line);
+      var t = document.createElementNS(ns, 'text'); t.setAttribute('x', 0); t.setAttribute('y', y + 4); t.textContent = v; svg.appendChild(t);
+    });
+    var colors = { ok: getComputedStyle(document.documentElement).getPropertyValue('--ok'), warn: getComputedStyle(document.documentElement).getPropertyValue('--warn'), bad: getComputedStyle(document.documentElement).getPropertyValue('--bad') };
+    h.forEach(function (r, i) {
+      var x = pad + i * (bw + 2), y = 10 + (100 - r.score);
+      var rect = document.createElementNS(ns, 'rect');
+      rect.setAttribute('x', x); rect.setAttribute('y', y); rect.setAttribute('width', bw); rect.setAttribute('height', r.score);
+      rect.setAttribute('fill', colors[lightFor(r.status)] || '#888');
+      var title = document.createElementNS(ns, 'title'); title.textContent = 'turn ' + r.turn + ': ' + r.score + ' (' + statusLabel(r.status) + ')' + (r.context_percent != null ? ', context ' + r.context_percent.toFixed(0) + '%' : ''); rect.appendChild(title);
+      svg.appendChild(rect);
+    });
+    var xl = document.createElementNS(ns, 'text'); xl.setAttribute('x', pad); xl.setAttribute('y', hh - 4); xl.textContent = 'turn 1 → ' + h[h.length - 1].turn; svg.appendChild(xl);
+    chart.appendChild(svg);
+  }).catch(function () {
+    $('title').textContent = 'Context Guard is not reachable';
+    $('error').textContent = 'Could not load ' + api; $('error').hidden = false;
+  }).finally(function () { $('main').hidden = !!$('error').textContent; });
+})();
+</script>
+</body>
+</html>

@@ -21,6 +21,7 @@ pub struct ConversationRow {
     pub first_seen: String,
     pub last_seen: String,
     pub turns: i64,
+    pub prompts: i64,
     pub last_health: Option<i64>,
     pub last_risk: Option<i64>,
     pub last_status: Option<String>,
@@ -34,6 +35,7 @@ pub struct ConversationRow {
 #[derive(Debug, Clone, FromRow)]
 pub struct HealthRow {
     pub turn: i64,
+    pub prompt: i64,
     pub ts: String,
     pub message_id: Option<String>,
     pub health: i64,
@@ -49,6 +51,7 @@ pub struct HealthRow {
 #[derive(Debug, Clone, FromRow)]
 pub struct AnomalyRow {
     pub turn: i64,
+    pub prompt: i64,
     pub ts: String,
     pub signal: String,
     pub penalty: i64,
@@ -94,6 +97,7 @@ pub struct NewEvent<'a> {
 pub struct TurnUpdate<'a> {
     pub conversation_id: &'a str,
     pub turns: u32,
+    pub prompts: u32,
     pub health: u32,
     pub risk: u32,
     pub status: &'a str,
@@ -107,6 +111,7 @@ pub struct TurnUpdate<'a> {
 pub struct NewHealth<'a> {
     pub conversation_id: &'a str,
     pub turn: u32,
+    pub prompt: u32,
     pub ts: DateTime<Utc>,
     pub message_id: Option<&'a str>,
     pub health: u32,
@@ -133,6 +138,7 @@ pub struct NewToolCall<'a> {
 pub struct NewAnomaly<'a> {
     pub conversation_id: &'a str,
     pub turn: u32,
+    pub prompt: u32,
     pub ts: DateTime<Utc>,
     pub signal: &'a str,
     pub penalty: u32,
@@ -220,11 +226,12 @@ impl Database {
 
     pub async fn update_conversation_turn(&self, u: TurnUpdate<'_>) -> Result<()> {
         sqlx::query(
-            "UPDATE conversations SET turns = ?, last_health = ?, last_risk = ?, last_status = ?,
+            "UPDATE conversations SET turns = ?, prompts = ?, last_health = ?, last_risk = ?, last_status = ?,
              last_context_percent = ?, last_prompt_tokens = ?, last_context_limit = ?,
              last_messages_count = ?, last_messages_hash = ? WHERE id = ?",
         )
         .bind(i64::from(u.turns))
+        .bind(i64::from(u.prompts))
         .bind(i64::from(u.health))
         .bind(i64::from(u.risk))
         .bind(u.status)
@@ -241,12 +248,13 @@ impl Database {
 
     pub async fn insert_health(&self, h: NewHealth<'_>) -> Result<()> {
         sqlx::query(
-            "INSERT INTO health_results (conversation_id, turn, ts, message_id, health, risk, status,
+            "INSERT INTO health_results (conversation_id, turn, prompt, ts, message_id, health, risk, status,
              context_percent, prompt_tokens, context_limit, reasons_json, summary)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(h.conversation_id)
         .bind(i64::from(h.turn))
+        .bind(i64::from(h.prompt))
         .bind(ts(h.ts))
         .bind(h.message_id)
         .bind(i64::from(h.health))
@@ -423,11 +431,12 @@ impl Database {
     /// Returns true when the anomaly was new (not deduplicated).
     pub async fn insert_anomaly(&self, a: NewAnomaly<'_>) -> Result<bool> {
         let result = sqlx::query(
-            "INSERT OR IGNORE INTO anomalies (conversation_id, turn, ts, signal, penalty, severity, detail, dedupe_key)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO anomalies (conversation_id, turn, prompt, ts, signal, penalty, severity, detail, dedupe_key)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(a.conversation_id)
         .bind(i64::from(a.turn))
+        .bind(i64::from(a.prompt))
         .bind(ts(a.ts))
         .bind(a.signal)
         .bind(i64::from(a.penalty))
@@ -439,23 +448,24 @@ impl Database {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn anomalies_since_turn(
+    /// Anomalies inside the scoring window, which is counted in prompts.
+    pub async fn anomalies_since_prompt(
         &self,
         conversation_id: &str,
-        min_turn: u32,
+        min_prompt: u32,
     ) -> Result<Vec<AnomalyRow>> {
         sqlx::query_as(
-            "SELECT turn, ts, signal, penalty, severity, detail FROM anomalies
-             WHERE conversation_id = ? AND turn >= ? ORDER BY turn, id",
+            "SELECT turn, prompt, ts, signal, penalty, severity, detail FROM anomalies
+             WHERE conversation_id = ? AND prompt >= ? ORDER BY turn, id",
         )
         .bind(conversation_id)
-        .bind(i64::from(min_turn))
+        .bind(i64::from(min_prompt))
         .fetch_all(self.pool())
         .await
     }
 
     pub async fn anomalies(&self, conversation_id: &str) -> Result<Vec<AnomalyRow>> {
-        self.anomalies_since_turn(conversation_id, 0).await
+        self.anomalies_since_prompt(conversation_id, 0).await
     }
 
     pub async fn list_conversations(
@@ -482,7 +492,7 @@ impl Database {
 
     pub async fn latest_health(&self, conversation_id: &str) -> Result<Option<HealthRow>> {
         sqlx::query_as(
-            "SELECT turn, ts, message_id, health, risk, status, context_percent, prompt_tokens, context_limit, reasons_json, summary
+            "SELECT turn, prompt, ts, message_id, health, risk, status, context_percent, prompt_tokens, context_limit, reasons_json, summary
              FROM health_results WHERE conversation_id = ? ORDER BY turn DESC, id DESC LIMIT 1",
         )
         .bind(conversation_id)
@@ -497,7 +507,7 @@ impl Database {
         message_id: &str,
     ) -> Result<Option<HealthRow>> {
         sqlx::query_as(
-            "SELECT turn, ts, message_id, health, risk, status, context_percent, prompt_tokens, context_limit, reasons_json, summary
+            "SELECT turn, prompt, ts, message_id, health, risk, status, context_percent, prompt_tokens, context_limit, reasons_json, summary
              FROM health_results WHERE conversation_id = ? AND message_id = ? ORDER BY turn DESC, id DESC LIMIT 1",
         )
         .bind(conversation_id)
@@ -512,7 +522,7 @@ impl Database {
         after: DateTime<Utc>,
     ) -> Result<Option<HealthRow>> {
         sqlx::query_as(
-            "SELECT turn, ts, message_id, health, risk, status, context_percent, prompt_tokens, context_limit, reasons_json, summary
+            "SELECT turn, prompt, ts, message_id, health, risk, status, context_percent, prompt_tokens, context_limit, reasons_json, summary
              FROM health_results WHERE conversation_id = ? AND ts >= ? ORDER BY turn DESC, id DESC LIMIT 1",
         )
         .bind(conversation_id)
@@ -527,7 +537,7 @@ impl Database {
         limit: u32,
     ) -> Result<Vec<HealthRow>> {
         let rows: Vec<HealthRow> = sqlx::query_as(
-            "SELECT turn, ts, message_id, health, risk, status, context_percent, prompt_tokens, context_limit, reasons_json, summary
+            "SELECT turn, prompt, ts, message_id, health, risk, status, context_percent, prompt_tokens, context_limit, reasons_json, summary
              FROM health_results WHERE conversation_id = ? ORDER BY turn DESC, id DESC LIMIT ?",
         )
         .bind(conversation_id)

@@ -1,8 +1,11 @@
 //! HTTP surface: ingest, health, conversations, metrics.
 
 pub mod conversations;
+pub mod explain;
 pub mod ingest;
+pub mod signals;
 pub mod system;
+pub mod ui;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,6 +38,9 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(system::healthz))
         .route("/metrics", get(system::metrics))
         .route("/api/v1/ingest/litellm", post(ingest::litellm))
+        .route("/api/v1/ingest/claude-code", post(ingest::claude_code))
+        .route("/api/v1/signals", get(signals::catalog))
+        .route("/ui/conversations/{id}", get(ui::conversation))
         .route("/api/v1/conversations", get(conversations::list))
         .route(
             "/api/v1/conversations/{id}/health",
@@ -44,6 +50,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/conversations/{id}/history",
             get(conversations::history),
         )
+        .route("/api/v1/conversations/{id}/explain", get(explain::explain))
         .layer(DefaultBodyLimit::max(limit))
         .with_state(state)
 }

@@ -101,6 +101,18 @@ impl Harness {
         assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     }
 
+    /// Ship Claude Code transcript records the way the hook does.
+    pub async fn ingest_claude_code(&self, records: &[Value], context_limit: Option<u64>) {
+        let body = json!({ "records": records, "context_limit": context_limit });
+        let (status, body) = self
+            .post(
+                "/api/v1/ingest/claude-code",
+                serde_json::to_vec(&body).unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    }
+
     /// Poll until the health endpoint returns 200 for the message id.
     pub async fn wait_for_message(&self, conversation: &str, message_id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(5);

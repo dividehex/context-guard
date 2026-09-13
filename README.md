@@ -1,11 +1,13 @@
 # Context Guard
 
 A deterministic, out-of-band health monitor for LLM conversations. Context
-Guard watches the completions that flow through [LiteLLM](https://github.com/BerriAI/litellm),
-keeps a per-chat record of what was said, and after every reply computes a
-health score from 0 to 100 with an explicit list of reasons.
+Guard watches the completions that flow through [LiteLLM](https://github.com/BerriAI/litellm)
+or the transcript of a [Claude Code](https://code.claude.com) session, keeps a
+per-chat record of what was said, and after every reply computes a health
+score from 0 to 100 with an explicit list of reasons.
 [Open WebUI](https://github.com/open-webui/open-webui) shows the score under
-each reply as a UI-only status line:
+each reply as a UI-only status line, and Claude Code shows the same line in
+its status bar:
 
 ```text
 🟢 Context Guard 100 · healthy · 🟢 context 4% (508/12,288)
@@ -32,9 +34,13 @@ It is never in the inference path. If it crashes, hangs, loses its database, or
 is removed, LiteLLM logs one line per flush and inference continues unchanged.
 
 Verified against LiteLLM v1.94.1 and Open WebUI v0.11.3 with llama.cpp
-backends. One Rust binary, one container, SQLite, no other services.
+backends, and against Claude Code 2.1.270. One Rust binary, one container,
+SQLite, no other services.
 
 ## Quick install
+
+For a Claude Code session, skip to [Claude Code integration](#claude-code-integration):
+it needs the service and two scripts, no LiteLLM.
 
 You need a compose stack with LiteLLM and Open WebUI on a shared Docker
 network, and Open WebUI already sending its user-info headers
@@ -219,10 +225,89 @@ valves:
 | `show_minimum` | always | show for every reply, or only from `good`/`watch`/`degraded`/`reset_recommended` down |
 | `notify_below` | 40 | toast when health falls below this; 0 disables |
 
+Open WebUI renders a status as plain text, so the line there is not a link;
+the same explanation page is at `/ui/conversations/{chat_id}` on the service.
 Open WebUI shows the status on a single line with an ellipsis, so anomalies
 use short labels (`drift`, `suspicious id`, `loop`, `repeated call`, `orphan
 result`, `unknown call id`) and fold into `+N more` past about 96 characters.
 The full reasons are always in the API response.
+
+## Claude Code integration
+
+Claude Code writes every session to a transcript
+(`~/.claude/projects/<cwd-slug>/<session-id>.jsonl`): one record per message
+block, tool result and bookkeeping event. That file carries everything the
+monitor reads from LiteLLM: the request delta, the reply, every tool call with
+its arguments, every tool result, and the token usage. Two standard-library
+Python scripts in `claude-code/` connect it, mirroring the LiteLLM logger and
+the Open WebUI filter:
+
+* `context_guard_hook.py`, an **async `Stop` and `PostToolUse` hook** plus a
+  short synchronous `SessionEnd` hook, ships the transcript's `user`,
+  `assistant` and `system` records written since its last run to
+  `POST /api/v1/ingest/claude-code`, then exits 0 without printing.
+  Attachment and bookkeeping records (environment, account, cost state) never
+  leave the machine. It keeps one cursor file per session: the byte offset of
+  the last completion it shipped, so that completion is resent and deduplicated
+  and no tool result is ever stranded between two ships. On `PostToolUse` the
+  reply still in progress is held back, because Claude Code runs a tool as soon
+  as its block streams in and the same response may add more calls; `Stop`
+  ships it complete. `SessionEnd` is a last chance at exit. In interactive
+  sessions every completion arrives; a headless `claude -p` run exits without
+  reliably waiting for its `Stop` or `SessionEnd` hooks, so the final reply of
+  such a run can be missing until a later hook resends it.
+* `context_guard_statusline.py`, the **`statusLine` command**, reads the
+  session id Claude Code passes on stdin, fetches the session's health and
+  prints the `summary`. The whole line is a terminal hyperlink (OSC 8) to
+  `/ui/conversations/{session_id}`, the explanation page, so a click (Ctrl or
+  Cmd held in kitty, iTerm2, WezTerm) opens every issue with what it means and
+  what to do; `CONTEXT_GUARD_LINK` with `{id}` points it at your own front end
+  instead. It also records the context window Claude Code reports so the hook
+  can pass it as the model's limit. When the service is unreachable it prints
+  the last line it showed for that session; before the first score, nothing.
+  One request, half a second.
+
+Install: run the service (the container, or the bare binary with
+`CONTEXT_GUARD_DATABASE` pointing somewhere writable), then merge
+`claude-code/settings.example.json` into `~/.claude/settings.json` with the
+script paths filled in. `CONTEXT_GUARD_URL` (default `http://127.0.0.1:7432`)
+and `CONTEXT_GUARD_STATE_DIR` (default `~/.local/state/context-guard/claude-code`)
+configure both scripts; `CONTEXT_GUARD_HOOK_LOG=/some/file` makes the hook
+append one line per run (event, records shipped, or the error) when you need
+to see what it did. The line appears after the first completion:
+
+```text
+🟢 Context Guard 95 · healthy · 🟢 context 11% (22,207/200,000) · 1 repeated call
+```
+
+How a transcript is scored:
+
+* **One API call is one turn; one user message is one prompt.** A completion
+  is the run of `assistant` records sharing a `requestId`; that id is the
+  event id, so redelivery is harmless. Turns number the scored results; the
+  anomaly window is counted in prompts, so a long tool loop cannot age an
+  issue out before you have read the reply that contained it.
+* **Prompt tokens** are `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens`: what the model actually held. The limit is
+  `CONTEXT_GUARD_MODEL_LIMITS` for that model if set, else the window the
+  status line reported; until either exists the context light reads unknown.
+* **The delta is explicit.** The hook ships increments, so each event carries
+  only the messages since the previous completion (the previous reply with its
+  tool calls, the tool results, the next prompt) and is flagged as a delta.
+* **Tool results are sources of truth**, like `tool` messages from LiteLLM;
+  `tool_use` blocks are the reply's tool calls; `text` blocks are the reply.
+  Thinking blocks are ignored. A tool result written between two blocks of
+  the same response belongs to the next request, after the reply it answers.
+* **Compaction summaries** (`isCompactSummary`) are model-written and stored
+  as user records; they are treated as system text so they never enter the
+  known-value registry. **Subagent** side chains are skipped. **API errors**
+  (`isApiErrorMessage`) are failures; Anthropic's "prompt is too long: N
+  tokens" is scored as a context overflow.
+
+Claude Code documents the transcript format as internal and subject to change
+on any release. The parser treats every field as optional, ignores record
+types it does not know, counts a record it cannot read as `malformed`, and is
+verified against a captured 2.1.270 session in `tests/fixtures/`.
 
 ## How scoring works
 
@@ -244,11 +329,15 @@ Each chat completion is one **turn**. For every turn:
    | `known_value_drift` | 15 | see below |
    | `tool_result_without_call` | 20 | a `tool` message's `tool_call_id` was not issued by an earlier assistant message in the same request (counted once per id) |
    | `tool_call_id_reference_unknown` | 25 | the reply cites something shaped like the conversation's real tool-call ids (same `call_` prefix, or for opaque ids such as llama.cpp's, the same length with letters and digits) that was never issued |
-   | `suspicious_identifier` | 5 | the reply introduces a name that is not known but is within 20 % edit distance of, or extends by prefix (≥ 6 shared chars), a known model, container, host, tool or name; paths and env vars use edit distance only |
+   | `suspicious_identifier` | 5 | the reply introduces a name that is not known but is within 20 % edit distance of, or extends by prefix (≥ 6 shared chars), a known model, container, host, tool or name; paths and env vars use edit distance only; a plain English plural of a known name (`auto-respawns` for `auto-respawn`) does not count |
 
 3. **Risk** = context penalty + the penalties of every anomaly recorded in the
-   last `window_turns` (default 10) turns. **Health** = `100 − risk`, clamped
+   last `window_turns` (default 10) prompts. **Health** = `100 − risk`, clamped
    to 0..100. The window lets a conversation recover after the behaviour stops.
+   A prompt is the unit the source says it is: for LiteLLM every completion
+   (so the window is ten completions, as before); for Claude Code a user
+   message, so a tool loop of thirty API calls is one prompt and an issue
+   caught at its start still counts at its end.
 4. **Status**: `≥ 90` healthy · `≥ 75` good · `≥ 60` watch · `≥ 40` degraded ·
    below that reset recommended. The lights follow the same scale, for health
    and for context pressure.
@@ -285,6 +374,9 @@ is drift; "open port 3000 for the UI" is not, because no anchored value
 conflicts; and if the user themself mentioned 4100 earlier, nothing fires.
 `ENV_VAR=value` pairs whose name looks like a key, token or password are never
 learned, so an assistant showing `OPENAI_API_KEY=your-key-here` is not drift.
+An unquoted value ends at the closing backtick or bracket that wraps the
+assignment, so `` `CLAUDECODE=1` `` in a reply matches `CLAUDECODE=1` in a
+prompt.
 False positives are treated as worse than misses.
 
 ## REST API
@@ -292,10 +384,14 @@ False positives are treated as worse than misses.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/api/v1/ingest/litellm` | LiteLLM telemetry (JSON array, object, or NDJSON). Always answers `202` with `{accepted, dropped}` once parsed; `400` for unparseable bodies, `413` above `CONTEXT_GUARD_MAX_BODY_BYTES`. Never waits for the database. |
+| `POST` | `/api/v1/ingest/claude-code` | Claude Code transcript records: `{"records": [...], "context_limit": N}` or a bare array / NDJSON of records. Same answers and limits as above; `accepted` counts records. |
 | `GET` | `/healthz` | `{status, database, queue_depth, uptime_s, version}`; `200` even when the database is unavailable. |
 | `GET` | `/api/v1/conversations?limit=50&status=watch` | Recent conversations with their latest score. |
 | `GET` | `/api/v1/conversations/{id}/health` | Latest result. `?message_id=X` returns the result for that Open WebUI message (`404 not_scored_yet` until it exists); `?after=<unix seconds>` the latest result at or after that time. |
 | `GET` | `/api/v1/conversations/{id}/history?limit=200` | All health results in turn order plus every anomaly. |
+| `GET` | `/api/v1/conversations/{id}/explain` | One document for a front end: the latest result, each reason with its title and explanation, every issue ever caught with whether it still counts, the score over turns, and the scoring parameters. `404 not_scored_yet` until the first turn. |
+| `GET` | `/api/v1/signals` | The signal catalog: name, family, severity, configured penalty, short label, title, explanation, plus the window and thresholds. |
+| `GET` | `/ui/conversations/{id}` | A self-contained page that renders the explain document (no external assets). The Claude Code status line links here. |
 | `GET` | `/metrics` | Prometheus text format. |
 
 Health response:
@@ -313,6 +409,23 @@ Health response:
     { "signal": "repeated_tool_call", "penalty": 5, "detail": "restart called with identical arguments 3 times" }
   ],
   "summary": "🟡 Context Guard 74 · watch · 🟡 context 78% (25,624/32,768) · 1 drift · 1 repeated call"
+}
+```
+
+Explain document, abridged:
+
+```json
+{
+  "conversation_id": "…", "model": "claude-opus-4-8", "turns": 39, "turn": 39,
+  "score": 80, "risk": 20, "status": "good", "summary": "🟢 Context Guard 80 · good · 🟢 context 31% (311,919/1,000,000) · 1 drift · 1 suspicious id",
+  "context": { "prompt_tokens": 311919, "limit": 1000000, "percent": 31.2 },
+  "scoring": { "formula": "health = 100 - risk; …", "window_turns": 10, "window_from_turn": 30,
+               "thresholds": { "healthy": 90, "good": 75, "watch": 60, "degraded": 40 } },
+  "reasons": [ { "signal": "known_value_drift", "penalty": 15, "severity": "medium", "family": "known_value_drift",
+                 "title": "Known-value drift", "explanation": "The assistant stated a different value …",
+                 "detail": "assistant said port of llama.cpp 8000 but the conversation established 8080" } ],
+  "issues":  [ { "turn": 33, "ts": "…", "signal": "known_value_drift", "penalty": 15, "counting": true, "title": "…", "explanation": "…", "detail": "…" } ],
+  "history": [ { "turn": 1, "ts": "…", "score": 100, "risk": 0, "status": "healthy", "context_percent": 4.1 } ]
 }
 ```
 
@@ -355,7 +468,7 @@ listener serves `/metrics` and `/healthz` and nothing else.
 | `CONTEXT_GUARD_DATABASE` | `/data/context-guard.db` | SQLite file (WAL mode) |
 | `CONTEXT_GUARD_RETENTION_DAYS` | 30 | hourly purge of conversations not seen for this long (at least 1) |
 | `CONTEXT_GUARD_CONFIG` | unset | optional TOML with `[penalties]`, `[thresholds]`, `[scoring]`, `[model_limits]` |
-| `CONTEXT_GUARD_MODEL_LIMITS` | unset | `model=tokens,model=tokens`; overrides the payload's limit |
+| `CONTEXT_GUARD_MODEL_LIMITS` | unset | `model=tokens,model=tokens`; overrides the payload's limit and the window the Claude Code status line reports |
 | `CONTEXT_GUARD_QUEUE_SIZE` | 1024 | bounded ingest queue (batches); full ⇒ dropped and counted |
 | `CONTEXT_GUARD_MAX_BODY_BYTES` | 33554432 | ingest body limit |
 | `CONTEXT_GUARD_STORE_MESSAGES` | false | also keep the full `messages[]` of every event (disk grows quadratically with chat length) |
@@ -392,10 +505,11 @@ cargo audit                                  # RustSec advisories; `cargo instal
 docker build -t context-guard .              # multi-stage; runtime is debian-slim, uid 10001
 ```
 
-Filter tests need Python with `aiohttp`, `pydantic` and `pytest`:
+Filter tests need Python with `aiohttp`, `pydantic` and `pytest`; the Claude
+Code scripts need only `pytest`:
 
 ```sh
-python -m pytest openwebui/
+python -m pytest openwebui/ claude-code/
 ```
 
 End-to-end against a live stack (`scripts/e2e_degradation.py`): drives one
@@ -411,7 +525,7 @@ scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model> [
 WebUI chat, each with the status line it produces.
 
 CI (`.github/workflows/ci.yml`) runs rustfmt, clippy, the Rust tests, `cargo
-audit`, the filter tests, and a build-and-smoke-test of the Docker image on
+audit`, the Python tests, and a build-and-smoke-test of the Docker image on
 every push.
 
 ## Current limitations
@@ -420,6 +534,12 @@ every push.
   `tool_calls` in the reply and `tool` messages in the next request; tools that
   never pass through the model are invisible. Tool signals need the model's
   Function Calling set to Native in Open WebUI.
+* Claude Code's transcript format is internal to Claude Code; a release can
+  change it. Subagent side chains are not scored. Headless `claude -p` runs
+  exit without reliably waiting for the end-of-turn hooks, so their last
+  completion may go unscored. `repeated_tool_call` fires
+  on three identical calls in the last five, which an agentic session can do
+  legitimately (three `git status` runs); the penalty is small by design.
 * Known-value drift is deliberately narrow: typed values with markers and an
   unambiguous anchor. Prose contradictions are out of scope.
 * Response looping uses exact-ish text similarity; paraphrased loops are missed.
@@ -431,13 +551,15 @@ every push.
 ## Repository layout
 
 ```text
-src/telemetry   LiteLLM payload → ConversationEvent, identity resolution
+src/telemetry   LiteLLM payload / Claude Code transcript → ConversationEvent, identity resolution
 src/monitor     the signals (pure functions) and the Monitor that runs them
 src/database    SQLite connection, migrations, typed queries, retention
-src/api         axum handlers
+src/api         axum handlers (ingest, conversations, explain, signals, ui)
+ui/             the explanation page, compiled into the binary
 src/metrics.rs  Prometheus registry
 src/worker.rs   queue consumer
 openwebui/      the Open WebUI filter, its tests, install script
+claude-code/    the Claude Code hook and status line, their tests, settings snippet
 scripts/        end-to-end degradation test
 docs/           UI walkthrough
 tests/          integration and fault-tolerance tests; real captured fixtures

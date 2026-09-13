@@ -118,7 +118,9 @@ static PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?:^|[\s"'`(=:,<>])(/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+)"#).unwrap()
 });
 static ENV_ASSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\b([A-Z][A-Z0-9_]{2,})=("[^"\n]*"|'[^'\n]*'|[^\s"',;]+)"#).unwrap()
+    // An unquoted value stops at whitespace, quotes, separators and the
+    // closing side of any bracket or backtick that may wrap the assignment.
+    Regex::new(r#"\b([A-Z][A-Z0-9_]{2,})=("[^"\n]*"|'[^'\n]*'|[^\s"',;`()\[\]{}<>]+)"#).unwrap()
 });
 static VERSION_WORD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:version|v\.?)\s*(\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.]+)?)\b").unwrap()
@@ -463,6 +465,27 @@ mod tests {
         values
             .iter()
             .any(|e| e.kind == kind && e.anchor == anchor && e.value == value)
+    }
+
+    #[test]
+    fn env_values_stop_at_backticks_and_brackets() {
+        let v = extract(
+            "run `CLAUDECODE=1` first, then (RUST_LOG=debug) and <FOO=bar>",
+            &[],
+        );
+        assert!(has(&v, ValueKind::EnvVar, "CLAUDECODE", "1"));
+        assert!(has(&v, ValueKind::EnvVar, "RUST_LOG", "debug"));
+        assert!(has(&v, ValueKind::EnvVar, "FOO", "bar"));
+        assert!(v
+            .iter()
+            .all(|e| e.kind != ValueKind::EnvVar || !e.value.ends_with(['`', ')', '>'])));
+        // The same assignment quoted in a reply is therefore not drift.
+        let registry: Vec<KnownValue> = v
+            .iter()
+            .map(|e| known(e.kind, &e.anchor, &e.value))
+            .collect();
+        let claims = extract("set `CLAUDECODE=1` in your shell", &[]);
+        assert!(detect_drift(&claims, &registry).is_empty());
     }
 
     #[test]

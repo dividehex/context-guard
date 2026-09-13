@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
+use super::content_text;
 use super::event::{ConversationEvent, EventKind, Message, Role, ToolCall, ToolResult};
 use super::identity::{self, TAG_MESSAGE_ID, TAG_TASK, TAG_USER_ID};
 use crate::config::Config;
@@ -181,6 +182,8 @@ pub fn normalize(value: &Value, config: &Config) -> Result<ConversationEvent, No
         completion_tokens: raw.completion_tokens.as_ref().and_then(as_u64),
         context_limit,
         messages,
+        messages_are_delta: false,
+        starts_prompt: true,
         response_text,
         tool_calls,
         tool_results,
@@ -252,19 +255,6 @@ fn parse_message(v: &Value) -> Option<Message> {
             .map(parse_tool_calls)
             .unwrap_or_default(),
     })
-}
-
-/// Flatten OpenAI message content to text: strings as-is, arrays keep `text` parts.
-fn content_text(v: Option<&Value>) -> String {
-    match v {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|p| p.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
 }
 
 fn parse_tool_calls(v: &Value) -> Vec<ToolCall> {

@@ -32,6 +32,7 @@ async fn purge_removes_stale_conversations_and_everything_they_own() {
     db.insert_anomaly(NewAnomaly {
         conversation_id: "old",
         turn: 1,
+        prompt: 1,
         ts: old_seen,
         signal: "response_loop",
         penalty: 5,
