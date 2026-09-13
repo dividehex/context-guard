@@ -78,6 +78,13 @@ GET /ui/conversations/{id}     (src/api/ui.rs) ui/conversation.html via include_
   (stdlib only, keep it that way); `scripts/e2e_degradation.py` live-stack
   test; `docs/ui-demo.md` the manual walkthrough (its expected scores are
   asserted by the e2e script, keep them consistent).
+- `scripts/extraction_recall/` (stdlib + pytest) measures known-value
+  extraction recall: seeded fact sheets, phrasing and tool-output templates,
+  a model-paraphrased fixture (`corpus/paraphrases.jsonl`, planted tokens
+  verified verbatim), and a survey of real transcripts whose output is
+  gitignored (`out/`). It calls the pure functions through
+  `examples/extract.rs`, the only example target; keep that binary out of the
+  Docker image and free of DB or network code.
 
 ## How scoring state works (non-obvious)
 
@@ -101,7 +108,11 @@ GET /ui/conversations/{id}     (src/api/ui.rs) ui/conversation.html via include_
   Tool results can be interleaved with the blocks of one response; the
   normalizer defers them to the next request instead of splitting the turn.
 - Known values and identifiers are learned only from `user` and `tool`
-  messages; `assistant` text is a claim; `system` is ignored.
+  messages; `assistant` text is a claim; `system` is ignored. Facts come from
+  `known_values::extract` (every form), claims from `extract_claims` (marker
+  forms only; nothing governed by a hedge, in a question or in fenced code). Plain-word anchors need the
+  conversation's `Lexicon`: identifier components and fact-sentence subjects
+  from the identifiers table plus the delta, never from the reply itself.
 - Anomalies are deduplicated per conversation by `dedupe_key`
   (`UNIQUE(conversation_id, dedupe_key)`); design the key so a persistent
   condition fires once, not every turn.
@@ -115,6 +126,9 @@ GET /ui/conversations/{id}     (src/api/ui.rs) ui/conversation.html via include_
 ## Adding or changing a signal (checklist)
 
 1. Pure detection function + unit tests in the right `monitor/` submodule.
+   For a change to `known_values.rs`, run the extraction-recall report
+   before and after and quote the moved numbers in the commit; a loosening
+   must not raise the `spurious` count or the benign false-positive rate.
 2. `Signal` variant in `scoring.rs`: `ALL`, `as_str`, `parse`, `severity`,
    `phrase`, `short` (fits the one-line Open WebUI status), `title`,
    `explanation` (what it detects, why it matters, what to do; no configured
@@ -134,7 +148,8 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets            # unit + integration; tests/binary.rs spawns the real binary
 cargo audit                         # RustSec advisories for Cargo.lock; ignores live in .cargo/audit.toml with a reason each
-python -m pytest -q openwebui/ claude-code/   # openwebui needs aiohttp, pydantic, pytest; claude-code only pytest
+python -m pytest -q openwebui/ claude-code/ scripts/extraction_recall   # openwebui needs aiohttp, pydantic, pytest; the rest only pytest
+python -m scripts.extraction_recall report    # extractor recall against planted facts; seconds, no stack needed
 docker build -t context-guard .     # multi-stage, runs as uid 10001, `context-guard healthcheck` subcommand
 scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model>   # live stack only
 ```

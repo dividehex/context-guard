@@ -20,7 +20,7 @@ use crate::database::Database;
 use crate::metrics::Metrics;
 use crate::telemetry::event::{ConversationEvent, EventKind, Message, Role};
 use identifiers::{IdKind, Identifier};
-use known_values::{KnownValue, ValueKind};
+use known_values::{KnownValue, Lexicon, ValueKind};
 use scoring::{Signal, WindowAnomaly};
 use text::{redact_secrets, sha256_hex};
 
@@ -283,11 +283,21 @@ impl Monitor {
         delta: &[Message],
         findings: &mut Vec<Finding>,
     ) -> anyhow::Result<()> {
-        for m in delta
+        // Plain words may anchor a value only when the conversation has used
+        // them as identifiers (`nginx` in `ai-nginx` or `/etc/nginx`).
+        let mut lexicon = Lexicon::default();
+        for row in self.db.identifiers(cid).await? {
+            lexicon.add_identifier(&row.value);
+        }
+        let sources: Vec<&Message> = delta
             .iter()
             .filter(|m| matches!(m.role, Role::User | Role::Tool))
-        {
-            for v in known_values::extract(&m.content, &self.config.container_prefixes) {
+            .collect();
+        for m in &sources {
+            lexicon.add_text(&m.content);
+        }
+        for m in sources {
+            for v in known_values::extract(&m.content, &self.config.container_prefixes, &lexicon) {
                 self.db
                     .upsert_known_value(
                         cid,
@@ -319,7 +329,8 @@ impl Monitor {
         if registry.is_empty() {
             return Ok(());
         }
-        let claims = known_values::extract(response, &self.config.container_prefixes);
+        let claims =
+            known_values::extract_claims(response, &self.config.container_prefixes, &lexicon);
         for d in known_values::detect_drift(&claims, &registry) {
             let entity = if d.anchor.is_empty() {
                 d.kind.as_str().to_string()

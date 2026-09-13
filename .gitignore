@@ -4,3 +4,4 @@ target/
 *.db-shm
 __pycache__/
 .pytest_cache/
+scripts/extraction_recall/out/

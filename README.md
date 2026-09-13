@@ -355,13 +355,61 @@ configuration (`config/context-guard.example.toml`), not in code.
 
 User and tool messages are **sources of truth**; assistant messages are
 **claims**; system prompts are ignored. From user and tool text, Context Guard
-extracts typed values: IPv4/IPv6 addresses, ports (only with an explicit
-marker such as `port 8080`, `host:8080`, `--port 8080`), URLs, absolute
-paths, `ENV_VAR=value`, versions (`v1.2.3`, `version 1.2`, `litellm 1.94.1`),
-hostnames with a real TLD, container names (configurable prefix, default
-`ai-`), and `snake_case_key: 123` settings. Each value gets an **anchor**: the
-nearest identifier-like token before it (`llama.cpp` in "llama.cpp is running
-on port 8080"), or none.
+extracts typed values:
+
+* IPv4/IPv6 addresses; loopback and unspecified addresses (`127.0.0.1`,
+  `0.0.0.0`, `::1`) name the machine itself and are not learned.
+* Ports, only with an explicit marker: `port 8080`, `port: 8080`,
+  `"port": 8080`, `the port is 8080`, `--port 8080`, `-p 8080`, `listen 8080`,
+  `listens on 8080`, `8080 is the port`, `host:8080`, `0.0.0.0:8080`,
+  `8080/tcp`, and a quoted compose mapping `"8080:80"`, whose published side
+  counts.
+* URLs and absolute paths.
+* Environment variables as `NAME=value`, and for underscored names also
+  `NAME: value` (compose `environment:` maps), `NAME is set to value`,
+  `NAME equals value` and `NAME is 42`; `NOTE: three things` is not one.
+* Versions: `v1.2.3`, `version 1.2`, `version: 1.2.3`, `"version": "1.2.3"`,
+  `the version is 1.2.3`, `litellm 1.94.1`, `litellm==1.94.1`, `pkg@1.2.3`,
+  `litellm: 1.94.1` (three components; a two-part `key: 1.2` is a setting).
+* Hostnames with a real TLD and container names (configurable prefix,
+  default `ai-`).
+* Settings: `snake_case_key: 123`, `"snake_case_key": 123`,
+  `snake-case-key = 123`, `--snake-case-key 123`, and for underscored keys
+  `set snake_case_key to 123`, `snake_case_key is 123`; hyphens normalise to
+  underscores so the flag and the file key are one setting.
+
+A value may end a sentence (`llama.cpp is at 10.0.0.5.`).
+
+Each value gets an **anchor**, the thing it belongs to. Candidates are the
+six tokens before the value, nearest first, then the tokens after it up to the
+end of the clause (never across `and`, `or`, `but`, `then`). An identifier-like
+token (`llama.cpp`, `ai-litellm`, `qwen3`) always qualifies, even from the
+previous sentence ("llama.cpp is up. It listens on port 8080"). A plain word
+qualifies only within the same sentence and line (each Markdown bullet has its
+own subject) and only if the conversation has named it: inside an identifier (`nginx` after `ai-nginx`, `/etc/nginx` or
+`nginx.lan`; `api` after `/api/v1`) or as the subject of a fact sentence
+("nginx is on port 8080" names nginx). Context Guard keeps that **lexicon**
+per conversation from the identifiers and user or tool text it has already
+seen; a reply's own prose never adds to it. Function words, value labels
+(`the`, `port`, `ipv6`), verbs that take a port as object (`open`, `expose`)
+and path roots (`var`, `log`) never anchor. Otherwise the anchor is empty. In a
+`NAME=value` pair or a `key: 123` setting the anchor is the name; in
+`litellm 1.94.1` it is the word before the version.
+
+**Facts and claims are read differently.** Everything above establishes a
+fact when a user or tool says it. An assistant reply counts as a *claim* only
+in explicit marker forms (`port 8080`, `"port": 8080`, `host:8080`,
+`NAME=value`, `version 1.2.3`, `litellm 1.94.1`, `key: 123`). Prose forms
+(`set max_tokens to 8192`, `NAME is set to`, `--flag 8192`, `LOG_LEVEL: debug`,
+`listen 8080`, a compose mapping) are never claims, because in a reply they are
+usually suggestions. And a value is not a claim when the words governing it
+hedge, condition, suggest, negate or propose a change (`could`, `if`, `try`,
+`for example`, `by default`, `not port 8081`, `instead`, `upgrade to`, `bump`,
+`was`, `will`, …; the list is `HEDGE_BEFORE_RE` in `known_values.rs`). Only
+the eight words before the value in its own sentence count, so "is on port
+8000, so the request should go through" is still a claim. Nothing in a
+question, inside a fenced code block, or under a hedge line that ends in a
+colon (`Alternatively:`) is a claim either.
 
 A claim is drift only when **all** of these hold:
 
@@ -375,8 +423,8 @@ A claim is drift only when **all** of these hold:
    those are the suspicious-identifier signal's job.
 
 So "the API is on port 4000" followed by an assistant "the API on port 4100"
-is drift; "open port 3000 for the UI" is not, because no anchored value
-conflicts; and if the user themself mentioned 4100 earlier, nothing fires.
+is drift; "you could open port 3000 for the UI" is not, because a suggestion
+is not a claim; and if the user themself mentioned 4100 earlier, nothing fires.
 `ENV_VAR=value` pairs whose name looks like a key, token or password are never
 learned, so an assistant showing `OPENAI_API_KEY=your-key-here` is not drift.
 An unquoted value ends at the closing backtick or bracket that wraps the
@@ -514,7 +562,7 @@ Filter tests need Python with `aiohttp`, `pydantic` and `pytest`; the Claude
 Code scripts need only `pytest`:
 
 ```sh
-python -m pytest openwebui/ claude-code/
+python -m pytest openwebui/ claude-code/ scripts/extraction_recall
 ```
 
 End-to-end against a live stack (`scripts/e2e_degradation.py`): drives one
@@ -528,6 +576,24 @@ scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model> [
 
 `docs/ui-demo.md` is the interactive version: messages to type into an Open
 WebUI chat, each with the status line it produces.
+
+Extraction recall (`scripts/extraction_recall/`): measures how many planted
+facts the known-value extractor registers from user and tool text, with which
+anchor, whether a wrong claim about each would fire drift, and how often a
+benign reply that merely mentions another value (a suggestion, a default, a
+hypothetical) fires it by mistake. Ground truth is a seeded fact sheet, so
+nothing is labelled by a model; a local model only
+paraphrases the statement templates, and a rewrite is kept only if every
+planted token survives verbatim. It drives the extractor directly through
+`examples/extract.rs`, so a full run takes seconds. `survey` scans your own
+Claude Code transcripts (and optionally the Context Guard database) for values
+the extractor missed; its output contains conversation text and stays local.
+
+```sh
+python -m scripts.extraction_recall report                        # templates, tool output, multi-fact, paraphrases
+python -m scripts.extraction_recall paraphrase --model <model>    # regenerate corpus/paraphrases.jsonl through LiteLLM
+python -m scripts.extraction_recall survey [--db data/context-guard.db]
+```
 
 CI (`.github/workflows/ci.yml`) runs rustfmt, clippy, the Rust tests, `cargo
 audit`, the Python tests, and a build-and-smoke-test of the Docker image on

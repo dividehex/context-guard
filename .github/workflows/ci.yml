@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install aiohttp pydantic pytest
-      - run: python -m pytest -q openwebui/ claude-code/
+      - run: python -m pytest -q openwebui/ claude-code/ scripts/extraction_recall
 
   image:
     name: Docker image
