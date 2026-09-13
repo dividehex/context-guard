@@ -38,6 +38,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "python3 /path/to/context-guard/claude-code/context_guard_statusline.py"
+    "command": "python3 /path/to/context-guard/claude-code/context_guard_statusline.py",
+    "refreshInterval": 2
   }
 }

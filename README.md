@@ -265,7 +265,12 @@ the Open WebUI filter:
   instead. It also records the context window Claude Code reports so the hook
   can pass it as the model's limit. When the service is unreachable it prints
   the last line it showed for that session; before the first score, nothing.
-  One request, half a second.
+  One request, half a second. Scoring happens out of band — the `Stop` hook
+  ships the reply and Context Guard scores it just after the reply is on
+  screen — so the `statusLine` entry sets `"refreshInterval": 2`: Claude Code
+  re-runs the command on its own events only and never while idle, so without
+  the timer a turn's score would not appear until the next reply, one prompt
+  late.
 
 Install: run the service (the container, or the bare binary with
 `CONTEXT_GUARD_DATABASE` pointing somewhere writable), then merge

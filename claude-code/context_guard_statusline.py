@@ -20,6 +20,15 @@ so the hook can pass it to Context Guard as the model's limit. When the
 service is unreachable it prints the last line it printed for this session,
 and nothing if there is none. One request, half a second, never more.
 
+A turn's score is produced out of band: the ``Stop`` hook ships the reply and
+Context Guard scores it a moment after the reply is already on screen, but
+Claude Code only re-runs this command on its own events (a new reply,
+``/compact``, ...) and never while the session is idle. Without help the fresh
+score would not show until the next reply, one prompt late. Set
+``"refreshInterval": 2`` on the ``statusLine`` entry (see
+``settings.example.json``) so Claude Code re-runs this command every couple of
+seconds; the just-scored turn then appears without waiting for the next prompt.
+
 Environment:
     CONTEXT_GUARD_URL        default http://127.0.0.1:7432
     CONTEXT_GUARD_LINK       default {CONTEXT_GUARD_URL}/ui/conversations/{id}
