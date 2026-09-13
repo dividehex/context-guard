@@ -135,7 +135,7 @@ impl Signal {
                 "The assistant referred to a tool-call id shaped like the conversation's real ids, with the same prefix or the same length and alphabet, that was never issued. The model is inventing tool history, which usually comes just before invented results. Treat its claims about earlier tool output with suspicion and restate what actually ran."
             }
             Signal::SuspiciousIdentifier => {
-                "The reply introduced a name that closely resembles one the conversation already uses but is not it: a model, container, host, tool or name within about twenty percent edit distance, or extended by a prefix of at least six shared characters; paths and environment variables by edit distance only. Near-duplicates are how an invented name slips in, such as a v2 suffix on a model that has no v2. Check the name before acting on it."
+                "The reply introduced a name that closely resembles one the conversation already uses but is not it: a model, container, host, tool or name within about twenty percent edit distance, or a known name extended by a suffix of its own, such as a v2 on a model that has no v2; paths and environment variables by edit distance only. Near-duplicates are how an invented name slips in. Not counted: an English plural, a shortened form of a known name, a dotted attribute of one, and for plain names a swap between hyphen and underscore, since prose uses those interchangeably while container and model names do not. Check the name before acting on it."
             }
         }
     }

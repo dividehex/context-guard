@@ -261,3 +261,40 @@ async fn anomaly_details_never_quote_secrets() {
     let r = h.wait_for_message("chat-s2", "m1").await;
     assert_eq!(r["score"], json!(100), "{r}");
 }
+
+#[tokio::test]
+async fn shortened_and_reformatted_known_names_are_not_suspicious() {
+    let h = harness().await;
+    const CHAT: &str = "chat-names";
+
+    // Turn 1: the user establishes names; the reply shortens, reformats and
+    // dereferences them, which is ordinary prose, not invention.
+    let t1 = PayloadBuilder::new("ev-n1", CHAT, "msg-n1")
+        .messages(json!([user(
+            "set daemon_reload: true in the play, read ansible_facts, and check that gnome-keyring-daemon is running"
+        )]))
+        .response("I ran daemon-reload, read ansible_facts.env and confirmed gnome-keyring is up.")
+        .prompt_tokens(2000)
+        .times(1.0, 2.0)
+        .build();
+    h.ingest(vec![t1]).await;
+    let r1 = h.wait_for_message(CHAT, "msg-n1").await;
+    assert_eq!(r1["score"], json!(100), "{r1}");
+    assert_eq!(r1["signals"]["suspicious_identifiers"], json!(0));
+
+    // Turn 2: a suffix on a known name is still the near-duplicate the signal exists for.
+    let t2 = PayloadBuilder::new("ev-n2", CHAT, "msg-n2")
+        .messages(json!([
+            user("set daemon_reload: true in the play, read ansible_facts, and check that gnome-keyring-daemon is running"),
+            assistant("I ran daemon-reload, read ansible_facts.env and confirmed gnome-keyring is up."),
+            user("anything else?")
+        ]))
+        .response("You should also set ansible_facts-v2 for the new collection.")
+        .prompt_tokens(2000)
+        .times(3.0, 4.0)
+        .build();
+    h.ingest(vec![t2]).await;
+    let r2 = h.wait_for_message(CHAT, "msg-n2").await;
+    assert_eq!(r2["score"], json!(95), "{r2}");
+    assert_eq!(r2["signals"]["suspicious_identifiers"], json!(1));
+}

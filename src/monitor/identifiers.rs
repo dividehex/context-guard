@@ -150,20 +150,23 @@ pub fn detect_suspicious(claims: &[Identifier], registry: &[Identifier]) -> Vec<
     let mut out: Vec<Suspicious> = Vec::new();
     for claim in claims {
         let group = claim.kind.group();
-        let known_exactly = registry
-            .iter()
-            .any(|k| k.kind.group() == group && k.value.eq_ignore_ascii_case(&claim.value));
-        if known_exactly {
-            continue;
-        }
-        let similar = registry
+        let peers: Vec<&Identifier> = registry
             .iter()
             .filter(|k| k.kind.group() == group)
-            .find(|k| is_similar(&claim.value, &k.value, group == 0));
+            .collect();
+        if peers
+            .iter()
+            .any(|k| comparable(claim, k) == comparable(k, claim))
+        {
+            continue;
+        }
+        let similar = peers
+            .iter()
+            .find(|k| is_similar(&comparable(claim, k), &comparable(k, claim), group == 0));
         if let Some(known) = similar {
             let s = Suspicious {
                 claimed: claim.clone(),
-                similar_to: known.clone(),
+                similar_to: (*known).clone(),
             };
             if !out.iter().any(|x| x.claimed == s.claimed) {
                 out.push(s);
@@ -173,34 +176,49 @@ pub fn detect_suspicious(claims: &[Identifier], registry: &[Identifier]) -> Vec<
     out
 }
 
+/// The form an identifier is compared in against `other`. Plain names use
+/// hyphen and underscore interchangeably in prose (`daemon-reload` for
+/// Ansible's `daemon_reload`); container, model and host names are looked up
+/// verbatim, so for them the separator is part of the name.
+fn comparable(id: &Identifier, other: &Identifier) -> String {
+    let lower = id.value.to_ascii_lowercase();
+    if id.kind == IdKind::Name && other.kind == IdKind::Name {
+        lower.replace('_', "-")
+    } else {
+        lower
+    }
+}
+
 /// `word` is `stem` with an English plural ending: prose about "the
 /// auto-respawns" names the known `auto-respawn`, it does not invent a new one.
 fn is_plural_of(word: &str, stem: &str) -> bool {
-    word.strip_suffix("es")
-        .or_else(|| word.strip_suffix('s'))
-        .is_some_and(|w| w == stem)
+    ["es", "s"]
+        .iter()
+        .any(|suffix| word.strip_suffix(suffix) == Some(stem))
 }
 
-fn is_similar(a: &str, b: &str, allow_prefix: bool) -> bool {
-    let a = a.to_ascii_lowercase();
-    let b = b.to_ascii_lowercase();
-    let longer = a.chars().count().max(b.chars().count());
-    if longer == 0 || is_plural_of(&a, &b) || is_plural_of(&b, &a) {
+/// `claim` resembles `known` closely enough to be a slip or an invention:
+/// within the edit budget, or (names only) `known` extended by a suffix such
+/// as `-v2`. A plural, a shortened form beyond the edit budget (`re-auth` for
+/// `re-authenticate`) and a dotted attribute (`ansible_facts.env`) all name
+/// the known thing rather than a new one. Both inputs are already lowercased.
+fn is_similar(claim: &str, known: &str, allow_prefix: bool) -> bool {
+    let longer = claim.chars().count().max(known.chars().count());
+    if longer == 0 || is_plural_of(claim, known) || is_plural_of(known, claim) {
         return false;
     }
-    let one_extends_other = a.starts_with(&b) || b.starts_with(&a);
-    if !allow_prefix && one_extends_other {
+    let claim_extends_known = claim.starts_with(known);
+    if !allow_prefix && (claim_extends_known || known.starts_with(claim)) {
         return false; // a longer path or variable built on a known one is normal
     }
-    let distance = levenshtein(&a, &b) as f64 / longer as f64;
+    if claim_extends_known && claim[known.len()..].starts_with('.') {
+        return false; // an attribute of a known name, not a new name
+    }
+    let distance = levenshtein(claim, known) as f64 / longer as f64;
     if distance <= MAX_RELATIVE_DISTANCE {
         return true;
     }
-    if allow_prefix {
-        let shorter = a.chars().count().min(b.chars().count());
-        return shorter >= MIN_PREFIX_LEN && one_extends_other;
-    }
-    false
+    allow_prefix && claim_extends_known && known.chars().count() >= MIN_PREFIX_LEN
 }
 
 #[cfg(test)]
@@ -253,6 +271,9 @@ mod tests {
             value: "auto-respawns".into(),
         }];
         assert!(detect_suspicious(&plural, &registry).is_empty());
+        // A stem ending in "e" takes a plain "s"; the "es" rule must not shadow it.
+        let registry_e = vec![id(IdKind::Name, "known-value")];
+        assert!(detect_suspicious(&[id(IdKind::Name, "known-values")], &registry_e).is_empty());
         let typo = vec![Identifier {
             kind: IdKind::Name,
             value: "auto-respwan".into(),
@@ -273,6 +294,78 @@ mod tests {
         );
         assert_eq!(
             detect_suspicious(&[id(IdKind::Path, "/data/context-guard.bd")], &registry).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn shortened_forms_of_known_names_are_not_suspicious() {
+        // Prose shortens real names; only an extension of a known name is invention.
+        for (claim, known) in [
+            ("re-run", "re-running"),
+            ("re-auth", "re-authenticate"),
+            ("gnome-keyring", "gnome-keyring-daemon"),
+            ("tool_result", "tool_result_without_call"),
+        ] {
+            let registry = vec![id(IdKind::Name, known)];
+            assert!(
+                detect_suspicious(&[id(IdKind::Name, claim)], &registry).is_empty(),
+                "{claim} vs {known}"
+            );
+        }
+        // Dropping a short tail stays within the edit budget and still fires.
+        let registry = vec![id(IdKind::Model, "qwen3-general-v2")];
+        assert_eq!(
+            detect_suspicious(&[id(IdKind::Model, "qwen3-general")], &registry).len(),
+            1
+        );
+        // An extension beyond the edit budget fires through the suffix rule.
+        let registry = vec![id(IdKind::Name, "auto-respawn")];
+        assert_eq!(
+            detect_suspicious(&[id(IdKind::Name, "auto-respawn-service")], &registry).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn separator_only_differences_name_the_same_thing() {
+        let registry = vec![
+            id(IdKind::Name, "daemon_reload"),
+            id(IdKind::Name, "tool_results"),
+            id(IdKind::Name, "known_values"),
+        ];
+        for claim in ["daemon-reload", "tool-result", "known-value"] {
+            assert!(
+                detect_suspicious(&[id(IdKind::Name, claim)], &registry).is_empty(),
+                "{claim}"
+            );
+        }
+        // Containers and models are looked up verbatim: the separator is part of the name.
+        let registry = vec![
+            id(IdKind::Container, "ai-litellm"),
+            id(IdKind::Model, "qwen3-general"),
+        ];
+        assert_eq!(
+            detect_suspicious(&[id(IdKind::Name, "ai_litellm")], &registry).len(),
+            1
+        );
+        assert_eq!(
+            detect_suspicious(&[id(IdKind::Model, "qwen3_general")], &registry).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn dotted_extension_of_known_name_is_attribute_access() {
+        let registry = vec![id(IdKind::Name, "ansible_facts")];
+        for claim in ["ansible_facts.env", "ansible_facts.os"] {
+            assert!(
+                detect_suspicious(&[id(IdKind::Name, claim)], &registry).is_empty(),
+                "{claim}"
+            );
+        }
+        assert_eq!(
+            detect_suspicious(&[id(IdKind::Name, "ansible_facts-v2")], &registry).len(),
             1
         );
     }

@@ -334,7 +334,7 @@ Each chat completion is one **turn**. For every turn:
    | `known_value_drift` | 15 | see below |
    | `tool_result_without_call` | 20 | a `tool` message's `tool_call_id` was not issued by an earlier assistant message in the same request (counted once per id) |
    | `tool_call_id_reference_unknown` | 25 | the reply cites something shaped like the conversation's real tool-call ids (same `call_` prefix, or for opaque ids such as llama.cpp's, the same length with letters and digits) that was never issued |
-   | `suspicious_identifier` | 5 | the reply introduces a name that is not known but is within 20 % edit distance of, or extends by prefix (≥ 6 shared chars), a known model, container, host, tool or name; paths and env vars use edit distance only; a plain English plural of a known name (`auto-respawns` for `auto-respawn`) does not count |
+   | `suspicious_identifier` | 5 | the reply introduces a name that is not known but is within 20 % edit distance of a known model, container, host, tool or name, or extends one by a suffix (known part ≥ 6 chars, `qwen3-general-v2` for `qwen3-general`); paths and env vars use edit distance only. Not counted: a plain English plural (`auto-respawns` for `auto-respawn`), a shortened form of a known name (`re-auth` for `re-authenticate`), a dotted attribute (`ansible_facts.env`), and for plain names a hyphen/underscore swap (`daemon-reload` for `daemon_reload`); container and model names keep their separator |
 
 3. **Risk** = context penalty + the penalties of every anomaly recorded in the
    last `window_turns` (default 10) prompts. **Health** = `100 − risk`, clamped
