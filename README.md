@@ -82,7 +82,7 @@ keeps its SQLite database in `/data`.
 git clone https://github.com/dividehex/context-guard
 docker run -d --name context-guard --restart unless-stopped \
   -p 127.0.0.1:7432:7432 -v context-guard-data:/data \
-  ghcr.io/dividehex/context-guard:0.3.1
+  ghcr.io/dividehex/context-guard:0.3.2
 curl -s http://127.0.0.1:7432/healthz        # {"status":"ok","database":"ok",...}
 ```
 
