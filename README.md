@@ -80,12 +80,16 @@ keeps its SQLite database in `/data`.
 
 ```sh
 git clone https://github.com/dividehex/context-guard
-cd context-guard
-docker build -t context-guard .
 docker run -d --name context-guard --restart unless-stopped \
-  -p 127.0.0.1:7432:7432 -v context-guard-data:/data context-guard
+  -p 127.0.0.1:7432:7432 -v context-guard-data:/data \
+  ghcr.io/dividehex/context-guard:0.3.1
 curl -s http://127.0.0.1:7432/healthz        # {"status":"ok","database":"ok",...}
 ```
+
+Every release publishes `ghcr.io/dividehex/context-guard` for `linux/amd64`
+and `linux/arm64` (Docker Desktop on Apple Silicon pulls the latter), tagged
+with the version, the minor version and `latest`. To build it yourself
+instead, run `docker build -t context-guard .` in the clone.
 
 If you already run LiteLLM and Open WebUI under compose, merge
 `docker-compose.example.yml` into that stack instead so the service shares
@@ -97,7 +101,7 @@ database:
 
 ```sh
 mkdir -p data/context-guard && sudo chown 10001 data/context-guard
-docker compose up -d --build context-guard
+docker compose up -d context-guard
 ```
 
 (Or uncomment `user:` in the compose file to run the service as the owner of
@@ -763,7 +767,10 @@ python -m scripts.extraction_recall survey [--db data/context-guard.db]
 
 CI (`.github/workflows/ci.yml`) runs rustfmt, clippy, the Rust tests, `cargo
 audit`, the Python tests, and a build-and-smoke-test of the Docker image on
-every push.
+every push. Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`,
+which checks that the tag matches the version strings, re-runs CI, builds and
+smoke-tests the image natively on amd64 and arm64 runners, publishes the
+multi-arch manifest to GHCR and creates the GitHub release.
 
 ## Current limitations
 

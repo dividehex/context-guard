@@ -210,5 +210,9 @@ Testing conventions:
 - The API has no auth by design (V1); the router is split so a bearer layer
   can wrap `/api/v1/*` later. Do not add auth piecemeal.
 - Versions: bump `Cargo.toml`, the filter docstring `version:` in
-  `openwebui/context_guard_filter.py`, and tag `vX.Y.Z`.
+  `openwebui/context_guard_filter.py`, the image tag in the README quick
+  start and `docker-compose.example.yml`, and tag `vX.Y.Z`. Pushing the tag
+  runs `.github/workflows/release.yml`, which refuses a tag that does not
+  match the version strings and publishes `ghcr.io/dividehex/context-guard`
+  for amd64 and arm64.
 - Commit messages are short imperative subjects in the style of `git log`.

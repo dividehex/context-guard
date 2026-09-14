@@ -2,14 +2,12 @@
 # Open WebUI, and give the `litellm` service the two environment variables.
 # Nothing depends on Context Guard: if it is down, inference is unaffected.
 #
-# `build.context` assumes this repository is cloned next to your compose file
-# (e.g. `git clone https://github.com/dividehex/context-guard`); an absolute path
-# works too.
+# The image is published for linux/amd64 and linux/arm64. To build from
+# source instead, clone the repository next to your compose file and replace
+# `image:` with `build: { context: ./context-guard }`.
 services:
   context-guard:
-    build:
-      context: ./context-guard
-    image: context-guard
+    image: ghcr.io/dividehex/context-guard:0.3.1
     container_name: context-guard
     restart: unless-stopped
     # user: "1000:1000"           # match the owner of ./data/context-guard if it is not uid 10001
