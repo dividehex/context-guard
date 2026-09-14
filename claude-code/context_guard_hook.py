@@ -24,7 +24,7 @@ end of a turn or of the process: everything is shipped. (A headless
 ``claude -p`` run exits without reliably waiting for either, so its final
 reply may only arrive with a later ship.)
 
-Environment:
+Environment (see ``agent-hooks/context_guard_shipper.py``):
     CONTEXT_GUARD_URL        default http://127.0.0.1:7432
     CONTEXT_GUARD_STATE_DIR  default $XDG_STATE_HOME/context-guard/claude-code
                              (~/.local/state/context-guard/claude-code)
@@ -34,30 +34,22 @@ Standard library only.
 """
 
 import json
-import os
 import sys
-import time
-import traceback
-import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent-hooks"))
+
+import context_guard_shipper as shipper  # noqa: E402
+
+SOURCE = "claude-code"
 SHIPPED_TYPES = {"user", "assistant", "system"}
-TIMEOUT_SECONDS = 5
+
+read_int = shipper.read_int
+log = shipper.log
 
 
 def state_dir() -> Path:
-    override = os.environ.get("CONTEXT_GUARD_STATE_DIR")
-    if override:
-        return Path(override)
-    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "context-guard" / "claude-code"
-
-
-def read_int(path: Path) -> int:
-    try:
-        return int(path.read_text().strip())
-    except (OSError, ValueError):
-        return 0
+    return shipper.state_dir(SOURCE)
 
 
 def read_context_limit(session_id: str) -> "int | None":
@@ -107,27 +99,7 @@ def slice_transcript(path: Path, start: int, hold_last_group: bool = False):
 
 
 def ship(url: str, records, context_limit) -> None:
-    body = json.dumps({"records": records, "context_limit": context_limit}).encode()
-    req = urllib.request.Request(
-        f"{url.rstrip('/')}/api/v1/ingest/claude-code",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as res:
-        if res.status != 202:
-            raise OSError(f"ingest answered {res.status}")
-
-
-def log(message: str) -> None:
-    path = os.environ.get("CONTEXT_GUARD_HOOK_LOG")
-    if not path:
-        return
-    try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
-    except OSError:
-        pass
+    shipper.ship(url, SOURCE, {"records": records, "context_limit": context_limit})
 
 
 def run(event: dict, url: str) -> None:
@@ -150,12 +122,7 @@ def run(event: dict, url: str) -> None:
 
 
 def main() -> int:
-    try:
-        event = json.load(sys.stdin)
-        run(event, os.environ.get("CONTEXT_GUARD_URL", "http://127.0.0.1:7432"))
-    except Exception:  # noqa: BLE001 - a hook must never fail the session
-        log(traceback.format_exc().strip().splitlines()[-1])
-    return 0
+    return shipper.run_hook(lambda event: run(event, shipper.service_url()))
 
 
 if __name__ == "__main__":

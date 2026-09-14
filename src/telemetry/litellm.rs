@@ -19,6 +19,8 @@ pub enum ParseError {
     Json(String),
     #[error("body is neither a JSON object, array nor NDJSON")]
     Shape,
+    #[error("body has no usable {0}")]
+    MissingField(&'static str),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

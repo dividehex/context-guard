@@ -101,7 +101,7 @@ pub async fn explain(
             "percent": latest.context_percent,
         },
         "scoring": {
-            "formula": "health = 100 - risk; risk = context penalty of the latest request + penalties of every issue recorded in the last window_turns prompts, capped at 100. A prompt is one completion for LiteLLM and one user message for Claude Code.",
+            "formula": "health = 100 - risk; risk = context penalty of the latest request + penalties of every issue recorded in the last window_turns prompts, capped at 100. A prompt is one completion for LiteLLM and one user message for Claude Code and Codex.",
             "window_turns": window_turns,
             "window_from_prompt": window_from_prompt,
             "thresholds": {

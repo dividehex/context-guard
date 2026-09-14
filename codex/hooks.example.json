@@ -1,0 +1,40 @@
+{
+  "description": "Context Guard: ship the session rollout and show the score after each turn.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/context-guard/codex/context_guard_codex_hook.py",
+            "timeout": 10,
+            "statusMessage": "Context Guard"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/context-guard/codex/context_guard_codex_hook.py",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/context-guard/codex/context_guard_codex_hook.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

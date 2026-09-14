@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(system::metrics))
         .route("/api/v1/ingest/litellm", post(ingest::litellm))
         .route("/api/v1/ingest/claude-code", post(ingest::claude_code))
+        .route("/api/v1/ingest/codex", post(ingest::codex))
         .route("/api/v1/signals", get(signals::catalog))
         .route("/ui/conversations/{id}", get(ui::conversation))
         .route("/api/v1/conversations", get(conversations::list))

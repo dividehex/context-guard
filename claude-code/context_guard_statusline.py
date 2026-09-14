@@ -29,24 +29,23 @@ score would not show until the next reply, one prompt late. Set
 ``settings.example.json``) so Claude Code re-runs this command every couple of
 seconds; the just-scored turn then appears without waiting for the next prompt.
 
-Environment:
+Environment (see ``agent-hooks/context_guard_shipper.py``):
     CONTEXT_GUARD_URL        default http://127.0.0.1:7432
     CONTEXT_GUARD_LINK       default {CONTEXT_GUARD_URL}/ui/conversations/{id}
     CONTEXT_GUARD_STATE_DIR  default $XDG_STATE_HOME/context-guard/claude-code
 Standard library only.
 """
 
-import json
 import os
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
-from urllib.parse import quote
 
-from context_guard_hook import state_dir
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent-hooks"))
 
-TIMEOUT_SECONDS = 0.5
+import context_guard_shipper as shipper  # noqa: E402
+from context_guard_hook import state_dir  # noqa: E402
+
+page_url = shipper.page_url
 
 
 def context_window_total(event: dict):
@@ -60,33 +59,10 @@ def context_window_total(event: dict):
     return None
 
 
-def remember(path: Path, text: str) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-    except OSError:
-        pass
-
-
-def recall(path: Path) -> str:
-    try:
-        return path.read_text().strip()
-    except OSError:
-        return ""
-
-
 def fetch_summary(url: str, session_id: str) -> str:
     """The summary for the session, or "" when it is not scored yet."""
-    target = f"{url.rstrip('/')}/api/v1/conversations/{quote(session_id, safe='')}/health"
-    try:
-        with urllib.request.urlopen(target, timeout=TIMEOUT_SECONDS) as res:
-            result = json.load(res)
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return ""
-        raise
-    summary = result.get("summary")
-    return summary if isinstance(summary, str) else f"Context Guard {result.get('score')}"
+    result = shipper.fetch_health(url, session_id)
+    return shipper.summary_line(result) if result else ""
 
 
 def run(event: dict, url: str) -> str:
@@ -95,20 +71,15 @@ def run(event: dict, url: str) -> str:
         return ""
     total = context_window_total(event)
     if total:
-        remember(state_dir() / f"{session_id}.window", str(total))
+        shipper.remember(state_dir() / f"{session_id}.window", str(total))
     cache = state_dir() / f"{session_id}.status"
     try:
         summary = fetch_summary(url, session_id)
     except Exception:  # noqa: BLE001 - unreachable service: show what we last knew
-        return recall(cache)
+        return shipper.recall(cache)
     if summary:
-        remember(cache, summary)
+        shipper.remember(cache, summary)
     return summary
-
-
-def page_url(url: str, session_id: str, template: "str | None" = None) -> str:
-    template = template or f"{url.rstrip('/')}/ui/conversations/{{id}}"
-    return template.replace("{id}", quote(session_id, safe=""))
 
 
 def linkify(text: str, href: str) -> str:
@@ -116,18 +87,17 @@ def linkify(text: str, href: str) -> str:
     return f"\033]8;;{href}\033\\{text}\033]8;;\033\\"
 
 
+def render(event: dict) -> str:
+    """The linked status line for the event, or "" for nothing."""
+    url = shipper.service_url()
+    line = run(event, url)
+    if not line:
+        return ""
+    return linkify(line, page_url(url, str(event.get("session_id")), os.environ.get("CONTEXT_GUARD_LINK")))
+
+
 def main() -> int:
-    try:
-        event = json.load(sys.stdin)
-        url = os.environ.get("CONTEXT_GUARD_URL", "http://127.0.0.1:7432")
-        line = run(event, url)
-        if line:
-            line = linkify(line, page_url(url, str(event.get("session_id")), os.environ.get("CONTEXT_GUARD_LINK")))
-    except Exception:  # noqa: BLE001 - a status line must never fail the session
-        line = ""
-    if line:
-        print(line)
-    return 0
+    return shipper.run_hook(render)
 
 
 if __name__ == "__main__":

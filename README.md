@@ -1,13 +1,14 @@
 # Context Guard
 
 A deterministic, out-of-band health monitor for LLM conversations. Context
-Guard watches the completions that flow through [LiteLLM](https://github.com/BerriAI/litellm)
-or the transcript of a [Claude Code](https://code.claude.com) session, keeps a
+Guard watches the completions that flow through [LiteLLM](https://github.com/BerriAI/litellm),
+the transcript of a [Claude Code](https://code.claude.com) session or the
+rollout of a [Codex CLI](https://github.com/openai/codex) session, keeps a
 per-chat record of what was said, and after every reply computes a health
 score from 0 to 100 with an explicit list of reasons.
 [Open WebUI](https://github.com/open-webui/open-webui) shows the score under
-each reply as a UI-only status line, and Claude Code shows the same line in
-its status bar:
+each reply as a UI-only status line, Claude Code shows the same line in its
+status bar, and Codex shows it under each reply:
 
 ```text
 🟢 Context Guard 100 · healthy · 🟢 context 4% (508/12,288)
@@ -15,13 +16,40 @@ its status bar:
 🟢 Context Guard 90 · healthy · 🔴 context overflow (16,456/12,288)
 ```
 
-> Context Guard does not determine the truth of arbitrary natural-language
-> statements. It detects deterministic indicators of conversation degradation,
-> inconsistency, context pressure, repetition, identifier drift, and tool
-> anomalies.
+## Why install it
 
-> Context Guard does not add any messages, prompts, canaries, or health
-> information to the model's context.
+Long conversations go wrong quietly. The assistant that was told the API runs
+on port 8080 starts saying 8000; a tool gets called with the same arguments a
+third time; the context window fills up and the model begins to forget; the
+reply you get is the one you got two turns ago. You usually find out after you
+have acted on the answer. Context Guard tells you at the moment it happens,
+and tells you what to do about it.
+
+* **You see degradation as it starts.** Every reply gets a score and a reason:
+  a contradicted fact, a suspicious near-duplicate identifier, a repeated tool
+  call, a looping reply, a context window at 78%. The status line names
+  what was caught, and a click opens a page that explains each issue, why
+  it matters, and whether to keep going, compact, or start a new chat.
+* **It costs the model nothing.** Nothing Context Guard produces ever reaches
+  the model: no injected messages, no canary tokens, no system-prompt text,
+  not one token of context. The score is UI-only by construction.
+* **It cannot break inference.** It sits beside the request path, never in
+  it. LiteLLM, Claude Code and Codex hand it copies after the reply is
+  already on screen. If it is down, slow, or deleted, the agent does not
+  notice.
+* **Every score is explainable and reproducible.** No second model, no
+  embeddings, no randomness. The signals are narrow on purpose: typed values
+  the user or a tool established unambiguously, exact repeated calls, exact
+  token counts. False positives are treated as worse than misses, so a red
+  light means something.
+* **One binary, three front ends, minutes to install.** A single Rust binary
+  with SQLite, packaged as a container. The Open WebUI filter, the Claude Code
+  hook and status line, and the Codex hook are short standard-library scripts.
+  Prometheus metrics, a REST API and a JSON explain document are there for
+  your own dashboards.
+
+It is verified against LiteLLM v1.94.1 and Open WebUI v0.11.3 with llama.cpp
+backends, Claude Code 2.1.270, and Codex CLI 0.154.0.
 
 ![Three Open WebUI replies with Context Guard status lines: 100 healthy after the user states facts, 85 with one drift after the assistant names the wrong port, 80 with a drift and a suspicious id after it names a near-duplicate model](docs/images/openwebui-status-lines.png)
 
@@ -30,77 +58,128 @@ facts (100, healthy), the assistant contradicts the port (85, one drift), then
 names a near-duplicate model (80, drift plus a suspicious id). The second light
 tracks context pressure separately, here 0% of the model's 122,880-token limit.
 
-It is never in the inference path. If it crashes, hangs, loses its database, or
-is removed, LiteLLM logs one line per flush and inference continues unchanged.
+## Quick start
 
-Verified against LiteLLM v1.94.1 and Open WebUI v0.11.3 with llama.cpp
-backends, and against Claude Code 2.1.270. One Rust binary, one container,
-SQLite, no other services.
+Two steps for every interface: run the service, then connect the interface
+you use. Each path takes a few minutes and nothing else in your stack changes.
 
-## Quick install
+### 1. Run the service
 
-For a Claude Code session, skip to [Claude Code integration](#claude-code-integration):
-it needs the service and two scripts, no LiteLLM.
-
-You need a compose stack with LiteLLM and Open WebUI on a shared Docker
-network, and Open WebUI already sending its user-info headers
-(`ENABLE_FORWARD_USER_INFO_HEADERS=true`, which is how it forwards the chat id).
-
-**1. Add the container.** Clone this repository next to your compose file and
-merge `docker-compose.example.yml` into it: one `context-guard` service on the
-same network as LiteLLM, with a `/data` volume.
+Clone the repository somewhere permanent (the Claude Code and Codex scripts run
+from it) and start Context Guard as a container. It listens on port 7432 and
+keeps its SQLite database in `/data`.
 
 ```sh
 git clone https://github.com/dividehex/context-guard
-mkdir -p data/context-guard
-docker compose up -d --build context-guard
+cd context-guard
+docker build -t context-guard .
+docker run -d --name context-guard --restart unless-stopped \
+  -p 127.0.0.1:7432:7432 -v context-guard-data:/data context-guard
 curl -s http://127.0.0.1:7432/healthz        # {"status":"ok","database":"ok",...}
 ```
 
-**2. Point LiteLLM at it.** Two environment variables on the `litellm`
-service and one block in the LiteLLM config file, then recreate LiteLLM.
-
-```yaml
-# compose: litellm service
-    environment:
-      GENERIC_LOGGER_ENDPOINT: http://context-guard:7432/api/v1/ingest/litellm
-      DEFAULT_FLUSH_INTERVAL_SECONDS: "1"
-```
-
-```yaml
-# litellm config.yaml
-litellm_settings:
-  callbacks: ["generic_api"]
-  extra_spend_tag_headers:
-    - x-openwebui-chat-id
-    - x-openwebui-user-id
-    - x-openwebui-message-id
-    - x-openwebui-task
-```
+If you already run LiteLLM and Open WebUI under compose, merge
+`docker-compose.example.yml` into that stack instead so the service shares
+LiteLLM's network (step 2a below assumes the service name `context-guard`).
+That file bind-mounts `./data/context-guard` as `/data`; create it first and
+make it writable for the service, which runs as uid 10001, or Docker creates
+it as root and the service exits at startup because it cannot create its
+database:
 
 ```sh
-docker compose up -d litellm
+mkdir -p data/context-guard && sudo chown 10001 data/context-guard
+docker compose up -d --build context-guard
 ```
 
-**3. Two headers on the Open WebUI connection.** Admin Panel → Settings →
-Connections → your LiteLLM connection → *Headers*, paste:
+(Or uncomment `user:` in the compose file to run the service as the owner of
+that directory.)
+Without Docker, `cargo build --release` and run
+`target/release/context-guard` with `CONTEXT_GUARD_LISTEN=127.0.0.1:7432` and
+`CONTEXT_GUARD_DATABASE` pointing at a writable file.
 
-```json
-{"X-OpenWebUI-Message-Id": "{{MESSAGE_ID}}", "X-OpenWebUI-Task": "{{TASK}}"}
-```
+### 2a. Open WebUI through LiteLLM
 
-Keep the double braces; Open WebUI fills them per request. The first lets the
-status line match its own reply exactly; the second marks background calls
-(title, tags, follow-ups) so they are not scored as turns.
+Open WebUI must already forward its user-info headers
+(`ENABLE_FORWARD_USER_INFO_HEADERS=true`, which is how it sends the chat id).
 
-**4. Install the filter.** Admin Panel → Functions → *+* → paste
-`openwebui/context_guard_filter.py` → Save → enable it → toggle **Global**.
-(Or `openwebui/install-filter.sh` with an admin API key.)
+1. **Point LiteLLM at the service.** Two environment variables on the
+   `litellm` service and one block in the LiteLLM config, then recreate
+   LiteLLM:
 
-**5. Send a message.** The status line appears under the reply within a
-second or two. `http://127.0.0.1:7432/api/v1/conversations` lists chats and
-scores; `docs/ui-demo.md` walks a chat through every signal so you can watch
-the score fall.
+   ```yaml
+   # compose: litellm service
+       environment:
+         GENERIC_LOGGER_ENDPOINT: http://context-guard:7432/api/v1/ingest/litellm
+         DEFAULT_FLUSH_INTERVAL_SECONDS: "1"
+   ```
+
+   ```yaml
+   # litellm config.yaml
+   litellm_settings:
+     callbacks: ["generic_api"]
+     extra_spend_tag_headers:
+       - x-openwebui-chat-id
+       - x-openwebui-user-id
+       - x-openwebui-message-id
+       - x-openwebui-task
+   ```
+
+   ```sh
+   docker compose up -d litellm
+   ```
+
+2. **Two headers on the Open WebUI connection.** Admin Panel → Settings →
+   Connections → your LiteLLM connection → *Headers*, paste:
+
+   ```json
+   {"X-OpenWebUI-Message-Id": "{{MESSAGE_ID}}", "X-OpenWebUI-Task": "{{TASK}}"}
+   ```
+
+   Keep the double braces; Open WebUI fills them per request. The first lets
+   the status line match its own reply exactly; the second marks background
+   calls (title, tags, follow-ups) so they are not scored as turns.
+
+3. **Install the filter.** Admin Panel → Functions → *+* → paste
+   `openwebui/context_guard_filter.py` → Save → enable it → toggle **Global**.
+   (Or `openwebui/install-filter.sh` with an admin API key.)
+
+4. **Send a message.** The status line appears under the reply within a
+   second or two. `docs/ui-demo.md` walks a chat through every signal so you
+   can watch the score fall.
+
+### 2b. Claude Code
+
+1. Merge `claude-code/settings.example.json` into `~/.claude/settings.json`,
+   replacing `/path/to/context-guard` with where you cloned the repository. It
+   adds three hooks (`Stop`, `PostToolUse`, `SessionEnd`) that ship the
+   transcript and a `statusLine` command that shows the score.
+2. If the service is not at `http://127.0.0.1:7432`, set `CONTEXT_GUARD_URL`
+   in the environment Claude Code starts from.
+3. Start a session and send a prompt. The score appears in the status bar
+   after the first reply, and the whole line is a link to the explanation
+   page. Python 3 is the only requirement; the scripts use the standard
+   library.
+
+### 2c. Codex CLI
+
+1. Merge `codex/hooks.example.json` into `~/.codex/hooks.json`, replacing
+   `/path/to/context-guard` with where you cloned the repository. It adds a
+   `Stop`, a `PostToolUse` and a `SessionEnd` hook; the same script ships the
+   rollout and prints the score.
+2. Start `codex`, run `/hooks`, and trust the Context Guard hooks. Codex asks
+   again whenever a hook entry changes. For `codex exec`, pass
+   `--dangerously-bypass-hook-trust` instead.
+3. If the service is not at `http://127.0.0.1:7432`, put `CONTEXT_GUARD_URL`
+   in your login environment or inline in each hook `command`
+   (`CONTEXT_GUARD_URL=http://host:7432 python3 …`); Codex runs hooks with a
+   snapshot of the environment the session started with.
+4. Send a prompt. The score appears under the reply as
+   `↳ Hook · 🟢 Context Guard 100 · healthy · …` with a link to the
+   explanation page. `codex exec` ships too but shows no hook output.
+
+Whichever path you took, `http://127.0.0.1:7432/api/v1/conversations` lists
+the chats it has scored, and `http://127.0.0.1:7432/ui/conversations/<id>`
+explains any one of them.
 
 ## What it does, and does not, claim
 
@@ -272,14 +351,12 @@ the Open WebUI filter:
   the timer a turn's score would not appear until the next reply, one prompt
   late.
 
-Install: run the service (the container, or the bare binary with
-`CONTEXT_GUARD_DATABASE` pointing somewhere writable), then merge
-`claude-code/settings.example.json` into `~/.claude/settings.json` with the
-script paths filled in. `CONTEXT_GUARD_URL` (default `http://127.0.0.1:7432`)
-and `CONTEXT_GUARD_STATE_DIR` (default `~/.local/state/context-guard/claude-code`)
-configure both scripts; `CONTEXT_GUARD_HOOK_LOG=/some/file` makes the hook
-append one line per run (event, records shipped, or the error) when you need
-to see what it did. The line appears after the first completion:
+Install steps are in [Quick start](#2b-claude-code). `CONTEXT_GUARD_URL`
+(default `http://127.0.0.1:7432`) and `CONTEXT_GUARD_STATE_DIR` (default
+`~/.local/state/context-guard/claude-code`) configure both scripts;
+`CONTEXT_GUARD_HOOK_LOG=/some/file` makes the hook append one line per run
+(event, records shipped, or the error) when you need to see what it did. The
+line appears after the first completion:
 
 ```text
 🟢 Context Guard 95 · healthy · 🟢 context 11% (22,207/200,000) · 1 repeated call
@@ -313,6 +390,81 @@ Claude Code documents the transcript format as internal and subject to change
 on any release. The parser treats every field as optional, ignores record
 types it does not know, counts a record it cannot read as `malformed`, and is
 verified against a captured 2.1.270 session in `tests/fixtures/`.
+
+## Codex CLI integration
+
+Codex CLI writes every session to a rollout
+(`~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl`): one
+record per prompt, model output item, tool output and bookkeeping event, with
+the token usage of every API response. One standard-library Python script in
+`codex/` connects it through Codex's hooks, which hand a hook the rollout
+path on stdin exactly as Claude Code does:
+
+* `context_guard_codex_hook.py`, a **synchronous `Stop` hook**, an async
+  `PostToolUse` hook and a short `SessionEnd` hook, ships the rollout records
+  written since its last run to `POST /api/v1/ingest/codex`. Only conversation
+  records leave the machine: `response_item` records other than the encrypted
+  `reasoning`, the turn's `turn_context` (the model), `token_usage_record` and
+  the `task_started`, `task_complete`, `turn_aborted` and `token_count`
+  events, and a `compacted` record reduced to its summary text. The session's
+  base instructions (`session_meta`) and `world_state` stay. It keeps one
+  cursor file per session: the byte offset of the last API response it
+  shipped, so that response is resent and deduplicated and no tool output is
+  ever stranded between two ships. On `PostToolUse` the response still in
+  progress is held back.
+* **The score line.** Codex has no custom status line, so on `Stop` the same
+  hook waits briefly for the final response's usage record, ships, polls the
+  health of the response it just shipped, and prints
+  `{"systemMessage": "…"}`. Codex renders that in the TUI as a dim line under
+  the reply and never sends it to the model or writes it to the rollout:
+
+  ```text
+  ↳ Hook · 🟢 Context Guard 100 · healthy · 🟢 context 6% (14,683/258,400) · http://127.0.0.1:7432/ui/conversations/<thread-id>
+  ```
+
+  The URL is the explanation page (`CONTEXT_GUARD_LINK` with `{id}` retargets
+  it). `CONTEXT_GUARD_WAIT_SECONDS` (default 2) bounds the whole wait; if the
+  score is not in yet the line shows the previous one, and before the first
+  score nothing. `codex exec` shows no hook output but ships all the same.
+
+Install steps are in [Quick start](#2c-codex-cli). `CONTEXT_GUARD_URL`
+(default `http://127.0.0.1:7432`), `CONTEXT_GUARD_STATE_DIR` (default
+`~/.local/state/context-guard/codex`) and `CONTEXT_GUARD_HOOK_LOG` configure
+the hook; Codex runs hooks with the session's environment snapshot, so they
+belong in the login environment or inline in the hook `command`. Codex's
+internal threads (memory consolidation) run hooks too; the hook ignores any
+rollout whose `session_meta.thread_source` is not `user`.
+
+How a rollout is scored:
+
+* **One API response is one turn; one user message is one prompt.** A
+  response is the run of model output items (assistant messages, tool calls)
+  closed by the record that carries its token usage: `token_usage_record`, or
+  the `token_count` event in a legacy-history rollout. Its `response_id` is
+  the event id, so redelivery is harmless. A response whose usage has not been
+  written yet waits for the next ship. Codex's code mode runs several shell
+  commands inside one `exec` tool call, which is one call to the monitor.
+* **Prompt tokens** are `input_tokens` of the response (cached tokens are
+  included). The limit is `CONTEXT_GUARD_MODEL_LIMITS` for the model if set,
+  else the `model_context_window` Codex writes in `task_started`.
+* **The delta is explicit**, as for Claude Code: each event carries only the
+  records since the previous response, flagged as a delta.
+* **Tool outputs are sources of truth**; tool calls are the reply's calls
+  (`function_call` arguments, `custom_tool_call` input, search actions); the
+  reply is the assistant messages' text. Reasoning is never shipped.
+* **Instructions are system text**: `developer` messages, and user messages
+  whose content kinds are not `user.text` (environment context, compaction
+  summaries), never enter the known-value registry. A `compacted` summary is
+  system text too. **Errors**: a `task_complete` event carrying an error is a
+  failure; Codex's "ran out of room in the model's context window" is scored
+  as a context overflow. An interrupted turn (`turn_aborted`) is scored with
+  what it produced, without tokens.
+
+Codex does not document the rollout format; it changed between the legacy and
+paginated history modes and can change again. The parser treats every field as
+optional, ignores record types it does not know, counts a record it cannot
+read as `malformed`, and is verified against a captured 0.154.0 session in
+`tests/fixtures/`.
 
 ## How scoring works
 
@@ -438,6 +590,7 @@ False positives are treated as worse than misses.
 |--------|------|---------|
 | `POST` | `/api/v1/ingest/litellm` | LiteLLM telemetry (JSON array, object, or NDJSON). Always answers `202` with `{accepted, dropped}` once parsed; `400` for unparseable bodies, `413` above `CONTEXT_GUARD_MAX_BODY_BYTES`. Never waits for the database. |
 | `POST` | `/api/v1/ingest/claude-code` | Claude Code transcript records: `{"records": [...], "context_limit": N}` or a bare array / NDJSON of records. Same answers and limits as above; `accepted` counts records. |
+| `POST` | `/api/v1/ingest/codex` | Codex CLI rollout records: `{"session_id": "...", "model": "...", "context_limit": N, "records": [...]}` (the envelope is required: rollout records do not name their session). Same answers and limits; `accepted` counts records. |
 | `GET` | `/healthz` | `{status, database, queue_depth, uptime_s, version}`; `200` even when the database is unavailable. |
 | `GET` | `/api/v1/conversations?limit=50&status=watch` | Recent conversations with their latest score. |
 | `GET` | `/api/v1/conversations/{id}/health` | Latest result. `?message_id=X` returns the result for that Open WebUI message (`404 not_scored_yet` until it exists); `?after=<unix seconds>` the latest result at or after that time. |
@@ -552,17 +705,17 @@ bearer-token shapes become `[redacted]`).
 
 ```sh
 cargo build --release
-cargo test                                   # 71 unit + integration tests, temp SQLite; also spawns the real binary
+cargo test                                   # 126 unit + integration tests, temp SQLite; also spawns the real binary
 cargo clippy --all-targets -- -D warnings
 cargo audit                                  # RustSec advisories; `cargo install cargo-audit`
 docker build -t context-guard .              # multi-stage; runtime is debian-slim, uid 10001
 ```
 
 Filter tests need Python with `aiohttp`, `pydantic` and `pytest`; the Claude
-Code scripts need only `pytest`:
+Code and Codex scripts need only `pytest`:
 
 ```sh
-python -m pytest openwebui/ claude-code/ scripts/extraction_recall
+python -m pytest openwebui/ claude-code/ codex/ scripts/extraction_recall
 ```
 
 End-to-end against a live stack (`scripts/e2e_degradation.py`): drives one
@@ -611,6 +764,11 @@ every push.
   completion may go unscored. `repeated_tool_call` fires
   on three identical calls in the last five, which an agentic session can do
   legitimately (three `git status` runs); the penalty is small by design.
+* Codex's rollout format is undocumented and has two history modes. There is
+  no custom status line in Codex: the score is a hook line under each reply,
+  shown only in the TUI, and the `Stop` hook waits up to
+  `CONTEXT_GUARD_WAIT_SECONDS` for it. Subagent threads are not scored.
+  Compaction has been verified against the Codex source, not a capture.
 * Known-value drift is deliberately narrow: typed values with markers and an
   unambiguous anchor. Prose contradictions are out of scope.
 * Response looping uses exact-ish text similarity; paraphrased loops are missed.
@@ -622,7 +780,7 @@ every push.
 ## Repository layout
 
 ```text
-src/telemetry   LiteLLM payload / Claude Code transcript → ConversationEvent, identity resolution
+src/telemetry   LiteLLM payload / Claude Code transcript / Codex rollout → ConversationEvent, identity resolution
 src/monitor     the signals (pure functions) and the Monitor that runs them
 src/database    SQLite connection, migrations, typed queries, retention
 src/api         axum handlers (ingest, conversations, explain, signals, ui)
@@ -631,6 +789,8 @@ src/metrics.rs  Prometheus registry
 src/worker.rs   queue consumer
 openwebui/      the Open WebUI filter, its tests, install script
 claude-code/    the Claude Code hook and status line, their tests, settings snippet
+codex/          the Codex CLI hook (ships the rollout, prints the score line), its tests, hooks snippet
+agent-hooks/    stdlib plumbing shared by the hooks (state dir, ship, health fetch) and the pytest stub
 scripts/        end-to-end degradation test
 docs/           UI walkthrough
 tests/          integration and fault-tolerance tests; real captured fixtures

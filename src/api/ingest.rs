@@ -1,4 +1,4 @@
-//! `POST /api/v1/ingest/{litellm,claude-code}`: validate, enqueue, answer.
+//! `POST /api/v1/ingest/{litellm,claude-code,codex}`: validate, enqueue, answer.
 //! Never waits for the database.
 
 use axum::body::Bytes;
@@ -8,7 +8,7 @@ use axum::Json;
 use serde_json::json;
 
 use super::{ApiError, AppState};
-use crate::telemetry::{claude_code, litellm};
+use crate::telemetry::{claude_code, codex, litellm};
 use crate::worker::Batch;
 
 type Accepted = Result<(StatusCode, Json<serde_json::Value>), ApiError>;
@@ -24,6 +24,14 @@ pub async fn litellm(State(state): State<AppState>, body: Bytes) -> Accepted {
 pub async fn claude_code(State(state): State<AppState>, body: Bytes) -> Accepted {
     let batch = match claude_code::parse_body(&body) {
         Ok(ingest) => Batch::ClaudeCode(ingest),
+        Err(e) => return Err(reject(&state, &body, e)),
+    };
+    Ok(enqueue(&state, &body, batch))
+}
+
+pub async fn codex(State(state): State<AppState>, body: Bytes) -> Accepted {
+    let batch = match codex::parse_body(&body) {
+        Ok(ingest) => Batch::Codex(ingest),
         Err(e) => return Err(reject(&state, &body, e)),
     };
     Ok(enqueue(&state, &body, batch))

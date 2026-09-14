@@ -1,57 +1,23 @@
 """Tests for the Claude Code hook and status line. Run: pytest claude-code/ (needs pytest only)."""
 
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import sys
+from pathlib import Path
 
 import pytest
 
-import context_guard_hook as hook
-import context_guard_statusline as statusline
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent-hooks"))
+
+import context_guard_hook as hook  # noqa: E402
+import context_guard_statusline as statusline  # noqa: E402
+from stub_service import Stub  # noqa: E402
 
 SESSION = "880138cf-78cd-4d41-9940-a4aa38c2aaec"
 
 
-class _Stub:
-    """Tiny HTTP server that records POST bodies and scripts GET responses per path."""
-
-    def __init__(self):
-        self.posts = []
-        self.gets = {}
-        stub = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length", 0))
-                stub.posts.append((self.path, json.loads(self.rfile.read(length))))
-                self._reply(202, {"accepted": 1, "dropped": 0})
-
-            def do_GET(self):
-                status, body = stub.gets.get(self.path, (404, {"error": {"code": "not_found"}}))
-                self._reply(status, body)
-
-            def _reply(self, status, body):
-                data = json.dumps(body).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-
-            def log_message(self, *_):
-                pass
-
-        self.server = HTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.url = f"http://127.0.0.1:{self.server.server_port}"
-
-    def close(self):
-        self.server.shutdown()
-
-
 @pytest.fixture
 def stub():
-    s = _Stub()
+    s = Stub()
     yield s
     s.close()
 
@@ -217,3 +183,35 @@ def test_statusline_main_never_fails_the_session(monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO("{not json"))
     assert statusline.main() == 0
     assert capsys.readouterr().out == ""
+
+
+SCRIPTS = Path(__file__).resolve().parent
+
+
+def run_script(name, stdin, env):
+    import os
+    import subprocess
+
+    return subprocess.run(
+        [sys.executable, str(SCRIPTS / name)],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env},
+        timeout=10,
+    )
+
+
+def test_scripts_run_standalone_by_path(stub, state):
+    """Claude Code runs each script by path, with only its own directory on
+    sys.path; an import error there is invisible to the module-level tests."""
+    env = {"CONTEXT_GUARD_URL": stub.url, "CONTEXT_GUARD_STATE_DIR": str(state)}
+    for name in ("context_guard_statusline.py", "context_guard_hook.py"):
+        done = run_script(name, "{}", env)
+        assert done.returncode == 0, done.stderr
+        assert done.stdout == "" and done.stderr == "", (name, done.stderr)
+    stub.gets[f"/api/v1/conversations/{SESSION}/health"] = (200, {"score": 96, "summary": "🟢 Context Guard 96 · healthy"})
+    done = run_script("context_guard_statusline.py", json.dumps({"session_id": SESSION}), env)
+    assert done.returncode == 0 and done.stderr == ""
+    assert "🟢 Context Guard 96 · healthy" in done.stdout
+    assert f"{stub.url}/ui/conversations/{SESSION}" in done.stdout

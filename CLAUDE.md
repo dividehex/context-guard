@@ -8,12 +8,13 @@ the same change.
 ## What this is
 
 A deterministic, out-of-band health monitor for LLM conversations. One Rust
-binary (axum + tokio + sqlx/SQLite) ingests LiteLLM `generic_api` batches and
-Claude Code transcript slices, scores each chat turn 0..100 with explicit
-reasons, and serves the result to an Open WebUI filter
-(`openwebui/context_guard_filter.py`) and a Claude Code status line
-(`claude-code/context_guard_statusline.py`), both UI-only. Verified against
-LiteLLM v1.94.1, Open WebUI v0.11.3 and Claude Code 2.1.270.
+binary (axum + tokio + sqlx/SQLite) ingests LiteLLM `generic_api` batches,
+Claude Code transcript slices and Codex CLI rollout slices, scores each chat
+turn 0..100 with explicit reasons, and serves the result to an Open WebUI
+filter (`openwebui/context_guard_filter.py`), a Claude Code status line
+(`claude-code/context_guard_statusline.py`) and a Codex `Stop`-hook line
+(`codex/context_guard_codex_hook.py`), all UI-only. Verified against LiteLLM
+v1.94.1, Open WebUI v0.11.3, Claude Code 2.1.270 and Codex CLI 0.154.0.
 
 ## Invariants (do not break these)
 
@@ -43,11 +44,14 @@ LiteLLM v1.94.1, Open WebUI v0.11.3 and Claude Code 2.1.270.
 ```
 POST /api/v1/ingest/litellm      (src/api/ingest.rs)
 POST /api/v1/ingest/claude-code  (same file; body from claude-code/context_guard_hook.py)
+POST /api/v1/ingest/codex        (same file; body from codex/context_guard_codex_hook.py)
   -> bounded mpsc queue of raw batches (worker::Batch, an enum tagged by source)
   -> src/worker.rs (single consumer; LiteLLM batches sorted by startTime, transcript slices kept in file order)
   -> src/telemetry/litellm.rs      normalize() -> ConversationEvent (full messages[]; the monitor computes the delta)
      src/telemetry/claude_code.rs  normalize() -> ConversationEvent per requestId group (messages_are_delta = true)
-     src/telemetry/identity.rs     conversation id precedence: chat tag > trace_id (opt-in) > fallback hash; Claude Code uses the session id
+     src/telemetry/codex.rs        normalize() -> ConversationEvent per API response, closed by its usage record (messages_are_delta = true)
+     src/telemetry/mod.rs          delta_completion()/delta_failure(): the one place a delta-source event is assembled (both sources above call it)
+     src/telemetry/identity.rs     conversation id precedence: chat tag > trace_id (opt-in) > fallback hash; Claude Code and Codex use the session id
   -> src/monitor/mod.rs  Monitor::process(): dedupe by event id, compute the message delta,
      run signals, persist anomalies, score the window, store health, update metrics
   -> src/database/repo.rs  every SQL statement lives here (runtime sqlx queries, FromRow structs)
@@ -74,8 +78,10 @@ GET /ui/conversations/{id}     (src/api/ui.rs) ui/conversation.html via include_
   `0001_initial.sql`; add `000N_<name>.sql` (`0002_prompts.sql` added the
   prompt counters and backfilled them from turns). Foreign keys cascade from
   `conversations`, so retention only deletes conversations.
-- `openwebui/` filter + pytest; `claude-code/` hook + status line + pytest
-  (stdlib only, keep it that way); `scripts/e2e_degradation.py` live-stack
+- `openwebui/` filter + pytest; `claude-code/` hook + status line + pytest and
+  `codex/` hook + pytest (stdlib only, keep it that way), both importing
+  `agent-hooks/context_guard_shipper.py` (state dir, ship, health fetch,
+  never-fail main) and testing against `agent-hooks/stub_service.py`; `scripts/e2e_degradation.py` live-stack
   test; `docs/ui-demo.md` the manual walkthrough (its expected scores are
   asserted by the e2e script, keep them consistent).
 - `scripts/extraction_recall/` (stdlib + pytest) measures known-value
@@ -107,6 +113,20 @@ GET /ui/conversations/{id}     (src/api/ui.rs) ui/conversation.html via include_
   ship of a `requestId` is the one that sticks (dedupe never extends an event).
   Tool results can be interleaved with the blocks of one response; the
   normalizer defers them to the next request instead of splitting the turn.
+- Codex specifics live in `telemetry/codex.rs` only: a turn is the run of
+  model output items closed by its usage record (`token_usage_record`, or the
+  `token_count` event in legacy history; once a `token_usage_record` is seen
+  `token_count` is ignored), the event id is the `response_id`, prompt tokens
+  are `input_tokens`, the model comes from `turn_context` (the hook's `model`
+  hint until then) and the limit from `task_started.model_context_window`.
+  Records carry no session id: the ingest envelope is required. `developer`
+  messages, user messages whose content kinds lack `user.text`, and
+  `compacted` summaries are `system`; a `task_complete` with `error` is a
+  failure; `turn_aborted` or a new `turn_context` flushes an open response
+  without usage. A response still open at the end of a slice is **not**
+  emitted (its usage is not written yet; the hook re-ships from the last
+  closed response and dedupe never extends an event). The hook prints JSON
+  only on `Stop` (`systemMessage`, UI-only) and nothing otherwise.
 - Known values and identifiers are learned only from `user` and `tool`
   messages; `assistant` text is a claim; `system` is ignored. Facts come from
   `known_values::extract` (every form), claims from `extract_claims` (marker
@@ -119,7 +139,7 @@ GET /ui/conversations/{id}     (src/api/ui.rs) ui/conversation.html via include_
 - Risk sums the anomalies recorded in the last `window_turns` **prompts**, so
   a chat recovers when the behaviour stops. `turn` numbers completions;
   `prompt` advances when an event has `starts_prompt` (LiteLLM: always, so
-  prompt == turn; Claude Code: the delta carries a `user` message). Anomalies
+  prompt == turn; Claude Code and Codex: the delta carries a `user` message). Anomalies
   and health rows store both; the window query filters on `prompt`.
 - Events are deduplicated by LiteLLM's payload `id`; redelivery is harmless.
 
@@ -148,7 +168,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets            # unit + integration; tests/binary.rs spawns the real binary
 cargo audit                         # RustSec advisories for Cargo.lock; ignores live in .cargo/audit.toml with a reason each
-python -m pytest -q openwebui/ claude-code/ scripts/extraction_recall   # openwebui needs aiohttp, pydantic, pytest; the rest only pytest
+python -m pytest -q openwebui/ claude-code/ codex/ scripts/extraction_recall   # openwebui needs aiohttp, pydantic, pytest; the rest only pytest
 python -m scripts.extraction_recall report    # extractor recall against planted facts; seconds, no stack needed
 docker build -t context-guard .     # multi-stage, runs as uid 10001, `context-guard healthcheck` subcommand
 scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model>   # live stack only
@@ -173,7 +193,10 @@ Testing conventions:
   batches and what the Claude Code hook shipped for a headless `claude -p`
   session. Do not hand-edit them; capture new ones with
   `CONTEXT_GUARD_CAPTURE_DIR` (for Claude Code: run the binary with it set,
-  then run the hook with a hand-written hook event on stdin).
+  then run the hook with a hand-written hook event on stdin; for Codex: point
+  `~/.codex/hooks.json` at that binary and run
+  `codex exec --dangerously-bypass-hook-trust`; the Codex fixtures are the
+  `PostToolUse` and `Stop` ships of one run).
 - Tests run in parallel; never bind fixed ports or share DB paths.
 
 ## Conventions

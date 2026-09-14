@@ -113,6 +113,24 @@ impl Harness {
         assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     }
 
+    /// Ship Codex rollout records the way the hook does.
+    pub async fn ingest_codex(
+        &self,
+        session_id: &str,
+        records: &[Value],
+        model: Option<&str>,
+        context_limit: Option<u64>,
+    ) {
+        let body = json!({
+            "session_id": session_id, "model": model,
+            "context_limit": context_limit, "records": records,
+        });
+        let (status, body) = self
+            .post("/api/v1/ingest/codex", serde_json::to_vec(&body).unwrap())
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    }
+
     /// Poll until the health endpoint returns 200 for the message id.
     pub async fn wait_for_message(&self, conversation: &str, message_id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(5);

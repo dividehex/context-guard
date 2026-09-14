@@ -9,15 +9,16 @@ use tokio::sync::mpsc::Receiver;
 use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::monitor::{Monitor, Outcome};
-use crate::telemetry::claude_code;
 use crate::telemetry::event::ConversationEvent;
 use crate::telemetry::litellm;
+use crate::telemetry::{claude_code, codex};
 
 /// One accepted ingest body, tagged with the source whose normalizer reads it.
 #[derive(Debug)]
 pub enum Batch {
     LiteLlm(Vec<Value>),
     ClaudeCode(claude_code::Ingest),
+    Codex(codex::Ingest),
 }
 
 impl Batch {
@@ -26,6 +27,7 @@ impl Batch {
         match self {
             Batch::LiteLlm(items) => items.len(),
             Batch::ClaudeCode(ingest) => ingest.records.len(),
+            Batch::Codex(ingest) => ingest.records.len(),
         }
     }
 
@@ -107,17 +109,23 @@ fn normalize(batch: &Batch, config: &Config, metrics: &Metrics) -> Vec<Conversat
         }
         Batch::ClaudeCode(ingest) => {
             let normalized = claude_code::normalize(ingest, config);
-            if normalized.malformed > 0 {
-                tracing::warn!(
-                    count = normalized.malformed,
-                    "malformed transcript records skipped"
-                );
-                metrics
-                    .events_dropped
-                    .with_label_values(&["malformed"])
-                    .inc_by(normalized.malformed as u64);
-            }
+            count_malformed(metrics, normalized.malformed);
             normalized.events
         }
+        Batch::Codex(ingest) => {
+            let normalized = codex::normalize(ingest, config);
+            count_malformed(metrics, normalized.malformed);
+            normalized.events
+        }
+    }
+}
+
+fn count_malformed(metrics: &Metrics, malformed: usize) {
+    if malformed > 0 {
+        tracing::warn!(count = malformed, "malformed transcript records skipped");
+        metrics
+            .events_dropped
+            .with_label_values(&["malformed"])
+            .inc_by(malformed as u64);
     }
 }

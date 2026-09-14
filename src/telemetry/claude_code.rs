@@ -15,9 +15,12 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::content_text;
-use super::event::{ConversationEvent, EventKind, IdSource, Message, Role, ToolCall, ToolResult};
+use super::event::{Message, Role, ToolCall};
 use super::litellm::{split_body, ParseError};
+pub use super::Normalized;
+use super::{
+    content_text, delta_completion, delta_failure, parse_rfc3339, DeltaFailure, DeltaReply,
+};
 use crate::config::Config;
 
 /// One ingest body: transcript records plus what the shipper knows that the
@@ -26,13 +29,6 @@ use crate::config::Config;
 pub struct Ingest {
     pub records: Vec<Value>,
     pub context_limit: Option<u64>,
-}
-
-/// The events one ingest body produced, and how many records were unusable.
-#[derive(Debug, Default)]
-pub struct Normalized {
-    pub events: Vec<ConversationEvent>,
-    pub malformed: usize,
 }
 
 /// Accepts `{"records": [...], "context_limit": N}` or a bare array / NDJSON of records.
@@ -110,7 +106,7 @@ impl Group {
     }
 
     fn absorb(&mut self, rec: &Record) {
-        let ts = rec.timestamp.as_deref().and_then(parse_time);
+        let ts = rec.timestamp.as_deref().and_then(parse_rfc3339);
         if self.first_uuid.is_none() {
             self.first_uuid = rec.uuid.clone();
             self.started_at = ts;
@@ -182,14 +178,6 @@ impl Builder<'_> {
             self.out.malformed += 1;
             return;
         };
-        let messages = std::mem::take(&mut self.pending);
-        let starts_prompt = messages.iter().any(|m| m.role == Role::User);
-        let response_text = if group.text.is_empty() {
-            None
-        } else {
-            Some(group.text.join("\n"))
-        };
-        let timestamp = group.timestamp.unwrap_or_else(Utc::now);
         let usage = &group.usage;
         let prompt_tokens = match (
             usage.input_tokens,
@@ -199,43 +187,24 @@ impl Builder<'_> {
             (None, None, None) => None,
             (a, b, c) => Some(a.unwrap_or(0) + b.unwrap_or(0) + c.unwrap_or(0)),
         };
-        self.pending.push(Message {
-            role: Role::Assistant,
-            content: response_text.clone().unwrap_or_default(),
-            tool_call_id: None,
-            tool_calls: group.tool_calls.clone(),
-        });
-        self.pending.append(&mut self.deferred);
-        self.out.events.push(ConversationEvent {
-            event_id: group.request_id,
-            conversation_id: session_id,
-            conversation_id_source: IdSource::Session,
-            user_id: None,
-            message_id: group.first_uuid,
-            request_id: None,
-            started_at: group.started_at.unwrap_or(timestamp),
-            timestamp,
-            kind: EventKind::Chat,
-            stream: None,
-            prompt_tokens,
-            completion_tokens: usage.output_tokens,
-            context_limit: self.config.model_limit(&model).or(self.context_limit_hint),
-            model,
-            tool_results: messages
-                .iter()
-                .filter(|m| m.role == Role::Tool)
-                .map(|m| ToolResult {
-                    tool_call_id: m.tool_call_id.clone(),
-                    content: m.content.clone(),
-                })
-                .collect(),
-            messages,
-            messages_are_delta: true,
-            starts_prompt,
-            response_text,
-            tool_calls: group.tool_calls,
-            error: None,
-        });
+        let event = delta_completion(
+            &mut self.pending,
+            &mut self.deferred,
+            DeltaReply {
+                event_id: group.request_id,
+                conversation_id: session_id,
+                message_id: group.first_uuid,
+                context_limit: self.config.model_limit(&model).or(self.context_limit_hint),
+                model,
+                started_at: group.started_at,
+                timestamp: group.timestamp,
+                prompt_tokens,
+                completion_tokens: usage.output_tokens,
+                text: group.text,
+                tool_calls: group.tool_calls,
+            },
+        );
+        self.out.events.push(event);
     }
 
     fn user(&mut self, rec: &Record) {
@@ -271,36 +240,23 @@ impl Builder<'_> {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
-        let error = content_text(rec.message.get("content"));
-        let timestamp = rec
-            .timestamp
-            .as_deref()
-            .and_then(parse_time)
-            .unwrap_or_else(Utc::now);
-        self.out.events.push(ConversationEvent {
-            event_id: id,
-            conversation_id: session_id,
-            conversation_id_source: IdSource::Session,
-            user_id: None,
-            message_id: rec.uuid.clone(),
-            request_id: None,
-            started_at: timestamp,
-            timestamp,
-            kind: EventKind::Failure,
-            stream: None,
-            prompt_tokens: None,
-            completion_tokens: None,
-            context_limit: self.config.model_limit(&model).or(self.context_limit_hint),
-            model,
-            messages: self.pending.clone(),
-            messages_are_delta: true,
-            // The retry of this request will carry the same prompt; count it once.
-            starts_prompt: false,
-            response_text: None,
-            tool_calls: Vec::new(),
-            tool_results: Vec::new(),
-            error: Some(error).filter(|e| !e.is_empty()),
-        });
+        let event = delta_failure(
+            &self.pending,
+            DeltaFailure {
+                event_id: id,
+                conversation_id: session_id,
+                message_id: rec.uuid.clone(),
+                context_limit: self.config.model_limit(&model).or(self.context_limit_hint),
+                model,
+                timestamp: rec
+                    .timestamp
+                    .as_deref()
+                    .and_then(parse_rfc3339)
+                    .unwrap_or_else(Utc::now),
+                error: content_text(rec.message.get("content")),
+            },
+        );
+        self.out.events.push(event);
     }
 
     fn assistant(&mut self, rec: &Record) {
@@ -409,15 +365,10 @@ pub fn normalize(ingest: &Ingest, config: &Config) -> Normalized {
     b.out
 }
 
-fn parse_time(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|d| d.with_timezone(&Utc))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::event::{EventKind, IdSource};
     use serde_json::json;
 
     const SESSION: &str = "880138cf-78cd-4d41-9940-a4aa38c2aaec";
