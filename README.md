@@ -638,7 +638,7 @@ Explain document, abridged:
   "conversation_id": "…", "model": "claude-opus-4-8", "turns": 39, "turn": 39,
   "score": 80, "risk": 20, "status": "good", "summary": "🟢 Context Guard 80 · good · 🟢 context 31% (311,919/1,000,000) · 1 drift · 1 suspicious id",
   "context": { "prompt_tokens": 311919, "limit": 1000000, "percent": 31.2 },
-  "scoring": { "formula": "health = 100 - risk; …", "window_turns": 10, "window_from_turn": 30,
+  "scoring": { "formula": "health = 100 - risk; …", "window_turns": 10, "window_from_prompt": 30,
                "thresholds": { "healthy": 90, "good": 75, "watch": 60, "degraded": 40 } },
   "reasons": [ { "signal": "known_value_drift", "penalty": 15, "severity": "medium", "family": "known_value_drift",
                  "title": "Known-value drift", "explanation": "The assistant stated a different value …",

@@ -152,7 +152,7 @@
     }
 
     var sc = d.scoring || {};
-    $('formula').textContent = 'Health is 100 minus risk. Risk adds the context penalty of the latest request to the penalty of every issue recorded in the last ' + sc.window_turns + ' turns (turn ' + sc.window_from_turn + ' onward), capped at 100. Issues older than the window stop counting, so the score recovers when the behaviour stops.';
+    $('formula').textContent = 'Health is 100 minus risk. Risk adds the context penalty of the latest request to the penalty of every issue recorded in the last ' + sc.window_turns + ' prompts (prompt ' + sc.window_from_prompt + ' onward), capped at 100. A prompt is one completion in Open WebUI and one user message in Claude Code and Codex, so a tool loop is one prompt. Issues older than the window stop counting, so the score recovers when the behaviour stops.';
 
     var reasons = $('reasons');
     if (!d.reasons || !d.reasons.length) reasons.appendChild(el('p', 'empty', 'Nothing is counting against this conversation right now.'));
