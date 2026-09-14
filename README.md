@@ -58,6 +58,15 @@ facts (100, healthy), the assistant contradicts the port (85, one drift), then
 names a near-duplicate model (80, drift plus a suspicious id). The second light
 tracks context pressure separately, here 0% of the model's 122,880-token limit.
 
+![The explanation page for a chat scored 75, good: the health number and status line, "Why this score" listing the three penalties (known-value drift −15, suspicious identifier −5, response loop −5) with the detail of each, "Issues caught" with every issue's severity, whether it still counts, the turn it was caught on and what it means and what to do, and a bar chart of health over the seven turns](docs/images/explain-page.png)
+
+The page behind the status line, for the same walkthrough a few turns on:
+every penalty with the exact detail that triggered it, each issue with its
+severity and whether it still counts in the window, what it means and what to
+do, and the score over turns. Open WebUI reaches it by expanding the status
+line; the Claude Code and Codex lines link to it directly. It renders the
+explain document from the API, which any front end can use.
+
 ## Quick start
 
 Two steps for every interface: run the service, then connect the interface
