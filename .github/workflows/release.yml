@@ -1,0 +1,149 @@
+name: Release
+
+# Cutting a release is: bump the version in Cargo.toml and the filter
+# docstring, commit, tag vX.Y.Z, push the tag. This workflow does the rest:
+# it re-runs CI, builds the image natively for linux/amd64 and linux/arm64
+# (Apple Silicon Macs run the latter under Docker Desktop), smoke-tests each,
+# publishes one multi-arch manifest to GHCR tagged X.Y.Z, X.Y and latest, and
+# creates the GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  version:
+    name: Tag matches the version strings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          filter="$(sed -n 's/^version: \(.*\)$/\1/p' openwebui/context_guard_filter.py | head -1)"
+          echo "tag=$tag Cargo.toml=$crate filter=$filter"
+          [ "$tag" = "$crate" ] && [ "$tag" = "$filter" ]
+
+  checks:
+    name: CI
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Image (${{ matrix.platform }})
+    needs: checks
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: context-guard
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+      - name: Smoke-test the image
+        run: |
+          docker run -d --name cg -p 127.0.0.1:7432:7432 context-guard
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:7432/healthz && break; sleep 1; done
+          docker exec cg context-guard healthcheck
+          docker rm -f cg
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push by digest
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},name-canonical=true,push-by-digest=true,push=true
+      - name: Save the digest for the manifest job
+        run: |
+          mkdir -p digests
+          touch "digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish manifest and release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          path: digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Create the multi-arch manifest
+        working-directory: digests
+        run: |
+          # The index annotation is what links the GHCR package to this repository.
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            --annotation "index:org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            $(printf "$IMAGE@sha256:%s " *)
+          docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
+      - name: Create the GitHub release
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --notes "$NOTES"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES: |
+            Container image (linux/amd64, linux/arm64):
+
+            ```
+            docker pull ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
+            ```
