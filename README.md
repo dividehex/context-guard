@@ -303,9 +303,13 @@ valves:
 | `settle_seconds` | 1.5 | re-check once after a result so a reply with tool or code-interpreter iterations shows its last iteration |
 | `show_minimum` | always | show for every reply, or only from `good`/`watch`/`degraded`/`reset_recommended` down |
 | `notify_below` | 40 | toast when health falls below this; 0 disables |
+| `explain_url` | `http://127.0.0.1:7432/ui/conversations/{id}` | browser-reachable link to the explanation page, `{id}` is the chat id; empty disables it |
 
-Open WebUI renders a status as plain text, so the line there is not a link;
-the same explanation page is at `/ui/conversations/{chat_id}` on the service.
+The status line is collapsible: click it and Open WebUI shows a link to the
+explanation page for the chat (`explain_url`, which must be reachable from
+the browser, not from the container; the default matches the quick start's
+`docker run`). This uses the widget Open WebUI renders for its own
+web-search status, the one status shape it makes clickable.
 Open WebUI shows the status on a single line with an ellipsis, so anomalies
 use short labels (`drift`, `suspicious id`, `loop`, `repeated call`, `orphan
 result`, `unknown call id`) and fold into `+N more` past about 96 characters.

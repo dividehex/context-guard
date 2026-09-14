@@ -14,6 +14,12 @@ required_open_webui_version: 0.6.0
 # renders under the reply. Status history is never part of what Open WebUI
 # sends to the model, so the score costs zero context tokens.
 #
+# A status is plain text, but Open WebUI renders one whose `action` is
+# `web_search` and that carries `items` as a collapsible line with the items
+# as links (the same widget it uses for its own web-search results). That is
+# how the explanation page gets a click: the summary stays the visible line,
+# expanding it shows the link.
+#
 # Fault isolation: every network call has a short timeout, every error is
 # swallowed, and the body is always returned unchanged. If Context Guard is
 # down this outlet costs at most `connect_timeout` seconds per reply.
@@ -56,6 +62,10 @@ class Filter:
             default=1.5,
             description="After a result arrives, wait this long and re-check once so a reply with tool or code-interpreter iterations shows its last iteration.",
         )
+        explain_url: str = Field(
+            default="http://127.0.0.1:7432/ui/conversations/{id}",
+            description="Browser-reachable link to the explanation page, shown when the status line is expanded; {id} is the chat id. Empty disables the link.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -88,7 +98,7 @@ class Filter:
         summary = result.get("summary") or f"Context Guard {result.get('score')}"
         status = str(result.get("status") or "")
         if self._should_show(status):
-            await emitter({"type": "status", "data": {"description": summary, "done": True}})
+            await emitter({"type": "status", "data": self._status_data(summary, chat_id)})
 
         score = result.get("score")
         if isinstance(score, (int, float)) and 0 < self.valves.notify_below and score < self.valves.notify_below:
@@ -98,6 +108,14 @@ class Filter:
                     "data": {"type": "warning", "content": f"Context Guard: this conversation scored {int(score)}. Consider starting a new chat."},
                 }
             )
+
+    def _status_data(self, summary: str, chat_id: str) -> dict:
+        data = {"description": summary, "done": True}
+        template = self.valves.explain_url.strip()
+        if template:
+            link = template.replace("{id}", quote(str(chat_id), safe=""))
+            data.update(action="web_search", items=[{"link": link, "title": "Why this score: the explanation page for this chat"}])
+        return data
 
     def _should_show(self, status: str) -> bool:
         minimum = (self.valves.show_minimum or "always").strip().lower()

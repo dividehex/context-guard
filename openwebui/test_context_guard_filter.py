@@ -78,6 +78,27 @@ def test_shows_status_and_returns_same_body(stub):
     body = dict(BODY)
     out = run(f.outlet(body, em, META))
     assert out is body
+    assert em.events == [
+        {
+            "type": "status",
+            "data": {
+                "description": HEALTH["summary"],
+                "done": True,
+                "action": "web_search",
+                "items": [{"link": "http://127.0.0.1:7432/ui/conversations/chat-1", "title": "Why this score: the explanation page for this chat"}],
+            },
+        }
+    ]
+
+
+def test_explain_link_uses_the_template_and_can_be_disabled(stub):
+    stub.responses["/api/v1/conversations/chat-1/health?message_id=msg-1"] = [(200, HEALTH)]
+    stub.responses["/api/v1/conversations/chat%201%2Fx/health?message_id=msg-1"] = [(200, HEALTH)]
+    f, em = make_filter(stub.url, explain_url="https://guard.example/c/{id}"), Emitter()
+    run(f.outlet(dict(BODY), em, {"chat_id": "chat 1/x", "message_id": "msg-1"}))
+    assert em.events[0]["data"]["items"][0]["link"] == "https://guard.example/c/chat%201%2Fx"
+    f, em = make_filter(stub.url, explain_url=""), Emitter()
+    run(f.outlet(dict(BODY), em, META))
     assert em.events == [{"type": "status", "data": {"description": HEALTH["summary"], "done": True}}]
 
 
