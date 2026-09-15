@@ -1,7 +1,7 @@
 """
 title: Context Guard
 author: context-guard
-version: 0.3.2
+version: 0.4.0
 description: Shows the Context Guard conversation-health score under each reply as a UI-only status line. Never modifies messages, prompts, or responses.
 required_open_webui_version: 0.6.0
 """

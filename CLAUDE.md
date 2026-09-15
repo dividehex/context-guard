@@ -45,12 +45,14 @@ v1.94.1, Open WebUI v0.11.3, Claude Code 2.1.270 and Codex CLI 0.154.0.
 POST /api/v1/ingest/litellm      (src/api/ingest.rs)
 POST /api/v1/ingest/claude-code  (same file; body from claude-code/context_guard_hook.py)
 POST /api/v1/ingest/codex        (same file; body from codex/context_guard_codex_hook.py)
+POST /api/v1/ingest/opencode     (same file; body from opencode/context_guard_shipper.mjs via the TUI plugin)
   -> bounded mpsc queue of raw batches (worker::Batch, an enum tagged by source)
   -> src/worker.rs (single consumer; LiteLLM batches sorted by startTime, transcript slices kept in file order)
   -> src/telemetry/litellm.rs      normalize() -> ConversationEvent (full messages[]; the monitor computes the delta)
      src/telemetry/claude_code.rs  normalize() -> ConversationEvent per requestId group (messages_are_delta = true)
      src/telemetry/codex.rs        normalize() -> ConversationEvent per API response, closed by its usage record (messages_are_delta = true)
-     src/telemetry/mod.rs          delta_completion()/delta_failure(): the one place a delta-source event is assembled (both sources above call it)
+     src/telemetry/opencode.rs     normalize() -> ConversationEvent per assistant message (messages_are_delta = true)
+     src/telemetry/mod.rs          delta_completion()/delta_failure(): the one place a delta-source event is assembled (all sources above call it)
      src/telemetry/identity.rs     conversation id precedence: chat tag > trace_id (opt-in) > fallback hash; Claude Code and Codex use the session id
   -> src/monitor/mod.rs  Monitor::process(): dedupe by event id, compute the message delta,
      run signals, persist anomalies, score the window, store health, update metrics
@@ -81,7 +83,9 @@ GET /ui/conversations/{id}     (src/api/ui.rs) ui/conversation.html via include_
 - `openwebui/` filter + pytest; `claude-code/` hook + status line + pytest and
   `codex/` hook + pytest (stdlib only, keep it that way), both importing
   `agent-hooks/context_guard_shipper.py` (state dir, ship, health fetch,
-  never-fail main) and testing against `agent-hooks/stub_service.py`; `scripts/e2e_degradation.py` live-stack
+  never-fail main) and testing against `agent-hooks/stub_service.py`; `opencode/`
+  TUI plugin (`context_guard.tui.tsx` + `context_guard_shipper.mjs`), tested
+  with `node --test "opencode/test/*.test.mjs"`; `scripts/e2e_degradation.py` live-stack
   test; `docs/ui-demo.md` the manual walkthrough (its expected scores are
   asserted by the e2e script, keep them consistent).
 - `scripts/extraction_recall/` (stdlib + pytest) measures known-value
@@ -169,6 +173,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets            # unit + integration; tests/binary.rs spawns the real binary
 cargo audit                         # RustSec advisories for Cargo.lock; ignores live in .cargo/audit.toml with a reason each
 python -m pytest -q openwebui/ claude-code/ codex/ scripts/extraction_recall   # openwebui needs aiohttp, pydantic, pytest; the rest only pytest
+node --test "opencode/test/*.test.mjs"   # shipper unit tests, zero deps
 python -m scripts.extraction_recall report    # extractor recall against planted facts; seconds, no stack needed
 docker build -t context-guard .     # multi-stage, runs as uid 10001, `context-guard healthcheck` subcommand
 scripts/e2e_degradation.py --litellm-key "$LITELLM_MASTER_KEY" --model <model>   # live stack only

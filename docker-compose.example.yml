@@ -7,7 +7,7 @@
 # `image:` with `build: { context: ./context-guard }`.
 services:
   context-guard:
-    image: ghcr.io/dividehex/context-guard:0.3.2
+    image: ghcr.io/dividehex/context-guard:0.4.0
     container_name: context-guard
     restart: unless-stopped
     # user: "1000:1000"           # match the owner of ./data/context-guard if it is not uid 10001

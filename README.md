@@ -2,13 +2,15 @@
 
 A deterministic, out-of-band health monitor for LLM conversations. Context
 Guard watches the completions that flow through [LiteLLM](https://github.com/BerriAI/litellm),
-the transcript of a [Claude Code](https://code.claude.com) session or the
-rollout of a [Codex CLI](https://github.com/openai/codex) session, keeps a
-per-chat record of what was said, and after every reply computes a health
-score from 0 to 100 with an explicit list of reasons.
+the transcript of a [Claude Code](https://code.claude.com) session, the
+rollout of a [Codex CLI](https://github.com/openai/codex) session or the chat
+of an opencode TUI session, keeps a per-chat record of what was said, and
+after every reply computes a health score from 0 to 100 with an explicit list
+of reasons.
 [Open WebUI](https://github.com/open-webui/open-webui) shows the score under
 each reply as a UI-only status line, Claude Code shows the same line in its
-status bar, and Codex shows it under each reply:
+status bar, Codex shows it under each reply, and opencode shows it in the
+right-hand sidebar:
 
 ```text
 🟢 Context Guard 100 · healthy · 🟢 context 4% (508/12,288)
@@ -34,22 +36,23 @@ and tells you what to do about it.
   the model: no injected messages, no canary tokens, no system-prompt text,
   not one token of context. The score is UI-only by construction.
 * **It cannot break inference.** It sits beside the request path, never in
-  it. LiteLLM, Claude Code and Codex hand it copies after the reply is
-  already on screen. If it is down, slow, or deleted, the agent does not
-  notice.
+  it. LiteLLM, Claude Code, Codex and the opencode plugin hand it copies after
+  the reply is already on screen. If it is down, slow, or deleted, the agent
+  does not notice.
 * **Every score is explainable and reproducible.** No second model, no
   embeddings, no randomness. The signals are narrow on purpose: typed values
   the user or a tool established unambiguously, exact repeated calls, exact
   token counts. False positives are treated as worse than misses, so a red
   light means something.
-* **One binary, three front ends, minutes to install.** A single Rust binary
+* **One binary, four front ends, minutes to install.** A single Rust binary
   with SQLite, packaged as a container. The Open WebUI filter, the Claude Code
-  hook and status line, and the Codex hook are short standard-library scripts.
-  Prometheus metrics, a REST API and a JSON explain document are there for
-  your own dashboards.
+  hook and status line, the Codex hook and the opencode TUI plugin are short
+  dependency-free scripts. Prometheus metrics, a REST API and a JSON explain
+  document are there for your own dashboards.
 
 It is verified against LiteLLM v1.94.1 and Open WebUI v0.11.3 with llama.cpp
-backends, Claude Code 2.1.270, and Codex CLI 0.154.0.
+backends, Claude Code 2.1.270, Codex CLI 0.154.0, and opencode 1.18.31 (TUI
+plugin only; headless `opencode run` is out of scope).
 
 ![Three Open WebUI replies with Context Guard status lines: 100 healthy after the user states facts, 85 with one drift after the assistant names the wrong port, 80 with a drift and a suspicious id after it names a near-duplicate model](docs/images/openwebui-status-lines.png)
 
@@ -74,15 +77,15 @@ you use. Each path takes a few minutes and nothing else in your stack changes.
 
 ### 1. Run the service
 
-Clone the repository somewhere permanent (the Claude Code and Codex scripts run
-from it) and start Context Guard as a container. It listens on port 7432 and
-keeps its SQLite database in `/data`.
+Clone the repository somewhere permanent (the Claude Code, Codex and opencode
+scripts run from it) and start Context Guard as a container. It listens on
+port 7432 and keeps its SQLite database in `/data`.
 
 ```sh
 git clone https://github.com/dividehex/context-guard
 docker run -d --name context-guard --restart unless-stopped \
   -p 127.0.0.1:7432:7432 -v context-guard-data:/data \
-  ghcr.io/dividehex/context-guard:0.3.2
+  ghcr.io/dividehex/context-guard:0.4.0
 curl -s http://127.0.0.1:7432/healthz        # {"status":"ok","database":"ok",...}
 ```
 
@@ -190,6 +193,19 @@ Open WebUI must already forward its user-info headers
    `↳ Hook · 🟢 Context Guard 100 · healthy · …` with a link to the
    explanation page. `codex exec` ships too but shows no hook output.
 
+### 2d. opencode TUI
+
+1. Merge `opencode/settings.example.json` into `~/.config/opencode/tui.json`,
+   replacing `/path/to/context-guard` with where you cloned the repository. It
+   adds the TUI plugin `opencode/context_guard.tui.tsx` to the `plugin` list.
+   (This opencode fork reads TUI plugins only from `tui.json`, not from the
+   `tui.plugin` block of `opencode.json`.)
+2. If the service is not at `http://127.0.0.1:7432`, set `CONTEXT_GUARD_URL`
+   in the environment opencode starts from.
+3. Start a session and send a prompt. The score appears in the right-hand
+   sidebar under the built-in Context panel after the first reply. Node.js 18
+   or newer is the only requirement; the shipper uses the standard library.
+
 Whichever path you took, `http://127.0.0.1:7432/api/v1/conversations` lists
 the chats it has scored, and `http://127.0.0.1:7432/ui/conversations/<id>`
 explains any one of them.
@@ -227,6 +243,10 @@ Open WebUI ──► LiteLLM ──► llama.cpp / other backends
    │             ▲
    │  Filter outlet: GET /api/v1/conversations/{chat_id}/health?message_id=…
    └─────────────┘  then a `status` event under the reply (never in messages[])
+
+Claude Code hooks, the Codex hook, and the opencode TUI plugin ship their
+transcripts, rollouts / session messages to /api/v1/ingest/* out-of-band and
+read the health back for their status line.
 ```
 
 ### Zero-context-overhead design
@@ -483,6 +503,62 @@ optional, ignores record types it does not know, counts a record it cannot
 read as `malformed`, and is verified against a captured 0.154.0 session in
 `tests/fixtures/`.
 
+## opencode TUI integration
+
+opencode writes no transcript file and has no hook system a background script
+could attach to, so the integration is a **TUI plugin**: a panel module
+(`opencode/context_guard.tui.tsx`) that runs inside the TUI and a
+dependency-free Node shipper it calls (`opencode/context_guard_shipper.mjs`).
+The plugin reads the flat session messages of the chat you are in, converts
+them to the same `{info, parts}` records Claude Code and Codex ship, and POSTs
+`{"session_id", "context_limit", "records"}` to `/api/v1/ingest/opencode`.
+
+* **The score lives in the right sidebar.** The plugin registers a
+  `sidebar_content` panel at order 150, between the built-in Context (100) and
+  MCP (200) panels. It shows `Context Guard` and the status on two lines,
+  coloured by the score: the health line (`🟢 Context Guard 90 · healthy`)
+  above the context line (`🟢 context 68% (…/…)`). Both lines are terminal
+  hyperlinks to the explain page, so clicking them opens the detail view in a
+  browser. It never calls `session.prompt` and returns nothing into the
+  pipeline: zero context overhead holds.
+* **One assistant message is one turn; one user message is one prompt**, as
+  for Claude Code. Each event is a delta flagged to the monitor, so a
+  compaction-rewritten or reshipped request is not double-counted.
+* **One cursor file per session** (the index of the last complete assistant
+  message) so a reship re-includes the boundary message — the same rule as the
+  Codex hook's byte cursor. A reply still streaming is held back; the session
+  re-synchronizes on the next event or a ~2 s poll.
+* **Shell messages attach to the assistant that ran them.** A message of type
+  `shell` becomes a `tool` part on the preceding assistant message, so the
+  result (a source of truth) and its call ride together in the same request.
+* **Synthetic context is system text.** `Synthetic` messages (environment
+  context) keep a `synthetic: true` marker that the monitor reads as `system`;
+  compaction summaries and `System` messages never enter the known-value
+  registry. A reply whose `error` text names the context window is scored as
+  an overflow, like the other sources.
+* **The context limit** is resolved from the model registry for the last
+  reply's model when the provider has an entry; otherwise the envelope leaves
+  it null and the monitor falls back to `CONTEXT_GUARD_MODEL_LIMITS` or
+  reports it unknown.
+* **Headless is out of scope for v1.** The plugin runs only in the TUI;
+  `opencode run` has no display surface and no hook system to ship from.
+  Real-session fixtures are captured with `scripts/capture_opencode_fixture.mjs`
+  (or `CONTEXT_GUARD_CAPTURE_DIR` on the plugin), and the committed fixture is
+  a faithful reproduction verified against the SDK types.
+
+Each health and context line in the panel is an OSC 8 terminal hyperlink to
+the explain page (`http://127.0.0.1:7432/ui/conversations/<session>`;
+click, or ctrl+click, depending on the terminal).
+
+The TUI's `SessionMessage` schema is not documented and can change; the
+shipper skips message kinds it does not know and the normalizer treats every
+field as optional.
+
+`CONTEXT_GUARD_URL` (default `http://127.0.0.1:7432`), `CONTEXT_GUARD_STATE_DIR`
+(default `~/.local/state/context-guard/opencode`), `CONTEXT_GUARD_CAPTURE_DIR`
+(write the exact payload instead of POSTing) and `CONTEXT_GUARD_NOTIFY_BELOW`
+(toast when the score drops under this; default 0, off) configure the plugin.
+
 ## How scoring works
 
 Each chat completion is one **turn**. For every turn:
@@ -608,6 +684,7 @@ False positives are treated as worse than misses.
 | `POST` | `/api/v1/ingest/litellm` | LiteLLM telemetry (JSON array, object, or NDJSON). Always answers `202` with `{accepted, dropped}` once parsed; `400` for unparseable bodies, `413` above `CONTEXT_GUARD_MAX_BODY_BYTES`. Never waits for the database. |
 | `POST` | `/api/v1/ingest/claude-code` | Claude Code transcript records: `{"records": [...], "context_limit": N}` or a bare array / NDJSON of records. Same answers and limits as above; `accepted` counts records. |
 | `POST` | `/api/v1/ingest/codex` | Codex CLI rollout records: `{"session_id": "...", "model": "...", "context_limit": N, "records": [...]}` (the envelope is required: rollout records do not name their session). Same answers and limits; `accepted` counts records. |
+| `POST` | `/api/v1/ingest/opencode` | opencode session records: `{"session_id": "...", "context_limit": N\|null, "records": [{"info", "parts"}]}` (the envelope is required: opencode messages do not name their session; `context_limit` may be null when the model registry has no entry). Same answers and limits; `accepted` counts records. |
 | `GET` | `/healthz` | `{status, database, queue_depth, uptime_s, version}`; `200` even when the database is unavailable. |
 | `GET` | `/api/v1/conversations?limit=50&status=watch` | Recent conversations with their latest score. |
 | `GET` | `/api/v1/conversations/{id}/health` | Latest result. `?message_id=X` returns the result for that Open WebUI message (`404 not_scored_yet` until it exists); `?after=<unix seconds>` the latest result at or after that time. |

@@ -11,7 +11,7 @@ use crate::metrics::Metrics;
 use crate::monitor::{Monitor, Outcome};
 use crate::telemetry::event::ConversationEvent;
 use crate::telemetry::litellm;
-use crate::telemetry::{claude_code, codex};
+use crate::telemetry::{claude_code, codex, opencode};
 
 /// One accepted ingest body, tagged with the source whose normalizer reads it.
 #[derive(Debug)]
@@ -19,6 +19,7 @@ pub enum Batch {
     LiteLlm(Vec<Value>),
     ClaudeCode(claude_code::Ingest),
     Codex(codex::Ingest),
+    OpenCode(opencode::Ingest),
 }
 
 impl Batch {
@@ -28,6 +29,7 @@ impl Batch {
             Batch::LiteLlm(items) => items.len(),
             Batch::ClaudeCode(ingest) => ingest.records.len(),
             Batch::Codex(ingest) => ingest.records.len(),
+            Batch::OpenCode(ingest) => ingest.records.len(),
         }
     }
 
@@ -114,6 +116,11 @@ fn normalize(batch: &Batch, config: &Config, metrics: &Metrics) -> Vec<Conversat
         }
         Batch::Codex(ingest) => {
             let normalized = codex::normalize(ingest, config);
+            count_malformed(metrics, normalized.malformed);
+            normalized.events
+        }
+        Batch::OpenCode(ingest) => {
+            let normalized = opencode::normalize(ingest, config);
             count_malformed(metrics, normalized.malformed);
             normalized.events
         }

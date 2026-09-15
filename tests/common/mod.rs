@@ -131,6 +131,26 @@ impl Harness {
         assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     }
 
+    /// Ship opencode session messages (`{info, parts}` pairs) the way the TUI
+    /// plugin does.
+    pub async fn ingest_opencode(
+        &self,
+        session_id: &str,
+        records: &[Value],
+        context_limit: Option<u64>,
+    ) {
+        let body = json!({
+            "session_id": session_id, "context_limit": context_limit, "records": records,
+        });
+        let (status, body) = self
+            .post(
+                "/api/v1/ingest/opencode",
+                serde_json::to_vec(&body).unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    }
+
     /// Poll until the health endpoint returns 200 for the message id.
     pub async fn wait_for_message(&self, conversation: &str, message_id: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(5);

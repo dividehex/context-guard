@@ -7,6 +7,7 @@ pub mod codex;
 pub mod event;
 pub mod identity;
 pub mod litellm;
+pub mod opencode;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;

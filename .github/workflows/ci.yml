@@ -33,7 +33,7 @@ jobs:
       - run: cargo audit
 
   filter:
-    name: Open WebUI filter, Claude Code and Codex scripts (pytest)
+    name: Open WebUI filter, Claude Code, Codex and opencode scripts (pytest + node)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -42,6 +42,10 @@ jobs:
           python-version: "3.12"
       - run: pip install aiohttp pydantic pytest
       - run: python -m pytest -q openwebui/ claude-code/ codex/ scripts/extraction_recall
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --test "opencode/test/*.test.mjs"
 
   image:
     name: Docker image

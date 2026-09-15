@@ -8,7 +8,7 @@ use axum::Json;
 use serde_json::json;
 
 use super::{ApiError, AppState};
-use crate::telemetry::{claude_code, codex, litellm};
+use crate::telemetry::{claude_code, codex, litellm, opencode};
 use crate::worker::Batch;
 
 type Accepted = Result<(StatusCode, Json<serde_json::Value>), ApiError>;
@@ -32,6 +32,14 @@ pub async fn claude_code(State(state): State<AppState>, body: Bytes) -> Accepted
 pub async fn codex(State(state): State<AppState>, body: Bytes) -> Accepted {
     let batch = match codex::parse_body(&body) {
         Ok(ingest) => Batch::Codex(ingest),
+        Err(e) => return Err(reject(&state, &body, e)),
+    };
+    Ok(enqueue(&state, &body, batch))
+}
+
+pub async fn opencode(State(state): State<AppState>, body: Bytes) -> Accepted {
+    let batch = match opencode::parse_body(&body) {
+        Ok(ingest) => Batch::OpenCode(ingest),
         Err(e) => return Err(reject(&state, &body, e)),
     };
     Ok(enqueue(&state, &body, batch))
